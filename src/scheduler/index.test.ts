@@ -1,0 +1,148 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('node-cron', () => ({
+  default: { schedule: vi.fn() },
+}));
+
+vi.mock('../metrics.js', () => ({
+  recordSchedulerJob: vi.fn(async () => {}),
+}));
+
+vi.mock('../context.js', () => ({
+  runWithContext: vi.fn((fn: () => any) => fn()),
+  getRequestId: vi.fn(() => 'test-id'),
+  getJobType: vi.fn(() => undefined),
+}));
+
+import { runJob, startScheduler, getRunningJobs } from './index.js';
+import cron from 'node-cron';
+import type { Config } from '../config.js';
+
+function makeAgent(mockResult?: any) {
+  return {
+    run: vi.fn().mockResolvedValue(
+      mockResult ?? {
+        report: {
+          summary: 'test',
+          overallStatus: 'healthy',
+          findings: [],
+          metrics: {},
+        },
+        rawText: '{}',
+        toolCallCount: 2,
+        rounds: 1,
+      },
+    ),
+  } as any;
+}
+
+function makeSlack() {
+  return {
+    postReport: vi.fn().mockResolvedValue(undefined),
+    postError: vi.fn().mockResolvedValue(undefined),
+  } as any;
+}
+
+describe('runJob', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('runs a job and produces a report', async () => {
+    const agent = makeAgent();
+    const slack = makeSlack();
+
+    await runJob('compliance', agent, slack, 'C123');
+
+    expect(agent.run).toHaveBeenCalledTimes(1);
+    expect(slack.postReport).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips job if already running', async () => {
+    const agent = makeAgent({
+      report: null,
+      rawText: 'pending...',
+      toolCallCount: 0,
+      rounds: 0,
+    });
+
+    // Simulate slow job
+    agent.run.mockImplementation(
+      () => new Promise(resolve => setTimeout(() => resolve({
+        report: { summary: 't', overallStatus: 'healthy', findings: [], metrics: {} },
+        rawText: '{}',
+        toolCallCount: 0,
+        rounds: 1,
+      }), 200)),
+    );
+
+    // Start first job (don't await)
+    const job1 = runJob('compliance', agent, null, undefined);
+
+    // Wait a tick for the first job to start
+    await new Promise(r => setTimeout(r, 50));
+
+    // Second job should be skipped
+    await runJob('compliance', agent, null, undefined);
+
+    // Wait for first to finish
+    await job1;
+
+    // Only one run call
+    expect(agent.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases lock after job completes', async () => {
+    const agent = makeAgent();
+    await runJob('security', agent, null, undefined);
+    expect(getRunningJobs()).not.toContain('security');
+  });
+
+  it('releases lock after job error', async () => {
+    const agent = makeAgent();
+    agent.run.mockRejectedValue(new Error('boom'));
+
+    await runJob('fleet', agent, null, undefined);
+    expect(getRunningJobs()).not.toContain('fleet');
+  });
+
+  it('posts error to Slack on job failure', async () => {
+    const agent = makeAgent();
+    agent.run.mockRejectedValue(new Error('agent failed'));
+    const slack = makeSlack();
+
+    await runJob('compliance', agent, slack, 'C123');
+
+    expect(slack.postError).toHaveBeenCalledTimes(1);
+    expect(slack.postError.mock.calls[0][1]).toBe('agent failed');
+  });
+
+  it('runs without Slack', async () => {
+    const agent = makeAgent();
+    await runJob('compliance', agent, null, undefined);
+    expect(agent.run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('startScheduler', () => {
+  it('registers cron jobs', () => {
+    const agent = makeAgent();
+    const config = {
+      scheduler: {
+        timezone: 'UTC',
+        cron: { compliance: '0 8 * * *', security: '0 9 * * *', fleet: '0 10 * * 1' },
+      },
+      slack: { channels: {} },
+    } as Config;
+
+    startScheduler({ agent, slack: null, config });
+
+    expect(cron.schedule).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('getRunningJobs', () => {
+  it('returns empty when no jobs running', () => {
+    expect(getRunningJobs()).toEqual([]);
+  });
+});
