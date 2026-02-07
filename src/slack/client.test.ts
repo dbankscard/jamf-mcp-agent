@@ -12,8 +12,18 @@ vi.mock('../metrics.js', () => ({
   recordSlackPost: vi.fn(async () => {}),
 }));
 
+vi.mock('../logger.js', () => ({
+  logger: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
 import { SlackClient } from './client.js';
 import { SlackError } from '../errors.js';
+import { logger } from '../logger.js';
 import type { AgentReport } from '../claude/types.js';
 
 function makeReport(overrides?: Partial<AgentReport>): AgentReport {
@@ -120,5 +130,178 @@ describe('SlackClient', () => {
     await expect(
       client.postError('C123', 'error', 'context'),
     ).rejects.toThrow(SlackError);
+  });
+
+  it('posts medium/low findings as summary in thread', async () => {
+    const report = makeReport({
+      findings: [
+        {
+          title: 'Medium issue',
+          severity: 'medium',
+          category: 'compliance',
+          description: 'medium desc',
+          affectedDeviceCount: 3,
+          affectedDevices: [],
+          remediation: { title: 'Fix', steps: [], effort: 'medium', automatable: false },
+        },
+        {
+          title: 'Low issue',
+          severity: 'low',
+          category: 'maintenance',
+          description: 'low desc',
+          affectedDeviceCount: 7,
+          affectedDevices: [],
+          remediation: { title: 'Update', steps: ['step1'], effort: 'low', automatable: true },
+        },
+      ],
+    });
+
+    const client = new SlackClient('xoxb-test');
+    await client.postReport('C123', report, 'compliance');
+
+    // Header + summary thread for medium/low = 2 calls
+    expect(mockPostMessage).toHaveBeenCalledTimes(2);
+    const summaryCall = mockPostMessage.mock.calls[1][0];
+    expect(summaryCall.thread_ts).toBe('123.456');
+    expect(summaryCall.text).toContain('Additional findings (2)');
+    expect(summaryCall.text).toContain('[medium]');
+    expect(summaryCall.text).toContain('[low]');
+    expect(summaryCall.text).toContain('3 device(s)');
+    expect(summaryCall.text).toContain('7 device(s)');
+  });
+
+  it('finding thread post failure logs warning and does not throw', async () => {
+    const report = makeReport({
+      findings: [
+        {
+          title: 'Critical vuln',
+          severity: 'critical',
+          category: 'security',
+          description: 'desc',
+          affectedDeviceCount: 1,
+          affectedDevices: [{ name: 'mac1', id: '1', detail: 'test' }],
+          remediation: { title: 'Patch', steps: ['patch'], effort: 'low', automatable: true },
+        },
+      ],
+    });
+
+    // Header succeeds, then finding thread post fails
+    mockPostMessage
+      .mockResolvedValueOnce({ ok: true, ts: '123.456' })
+      .mockRejectedValueOnce(new Error('rate_limited'));
+
+    const client = new SlackClient('xoxb-test');
+    // Should not throw
+    await client.postReport('C123', report, 'security');
+
+    expect(mockPostMessage).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to post finding thread: Critical vuln'),
+      expect.objectContaining({ error: 'rate_limited' }),
+    );
+  });
+
+  it('postError posts error blocks to channel', async () => {
+    const client = new SlackClient('xoxb-test');
+    await client.postError('C456', 'Timeout exceeded', 'scheduled compliance');
+
+    expect(mockPostMessage).toHaveBeenCalledTimes(1);
+    const call = mockPostMessage.mock.calls[0][0];
+    expect(call.channel).toBe('C456');
+    expect(call.text).toContain('Timeout exceeded');
+    expect(call.text).toContain('scheduled compliance');
+    expect(call.blocks).toBeDefined();
+  });
+
+  it('postError throws SlackError with context on API failure', async () => {
+    mockPostMessage.mockRejectedValue(new Error('account_inactive'));
+
+    const client = new SlackClient('xoxb-test');
+
+    try {
+      await client.postError('C123', 'error msg', 'nightly scan');
+      expect.fail('Expected SlackError to be thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(SlackError);
+      const slackErr = err as InstanceType<typeof SlackError>;
+      expect(slackErr.message).toBe('Failed to post error message');
+      expect(slackErr.context).toEqual({ channelId: 'C123', errorContext: 'nightly scan' });
+      expect(slackErr.cause).toBeInstanceOf(Error);
+      expect((slackErr.cause as Error).message).toBe('account_inactive');
+    }
+  });
+
+  it('skips thread replies when no critical/high findings exist', async () => {
+    const report = makeReport({
+      findings: [
+        {
+          title: 'Low priority',
+          severity: 'low',
+          category: 'maintenance',
+          description: 'desc',
+          affectedDeviceCount: 2,
+          affectedDevices: [],
+          remediation: { title: 'Fix', steps: [], effort: 'low', automatable: false },
+        },
+      ],
+    });
+
+    const client = new SlackClient('xoxb-test');
+    await client.postReport('C123', report, 'compliance');
+
+    // Header + low summary = 2 calls, no critical/high thread replies
+    expect(mockPostMessage).toHaveBeenCalledTimes(2);
+    // First call is header (no thread_ts), second is summary (with thread_ts)
+    expect(mockPostMessage.mock.calls[0][0].thread_ts).toBeUndefined();
+    expect(mockPostMessage.mock.calls[1][0].thread_ts).toBe('123.456');
+    expect(mockPostMessage.mock.calls[1][0].text).toContain('Additional findings (1)');
+  });
+
+  it('header post failure throws SlackError with context', async () => {
+    mockPostMessage.mockRejectedValue(new Error('channel_not_found'));
+
+    const client = new SlackClient('xoxb-test');
+
+    try {
+      await client.postReport('C999', makeReport(), 'inventory');
+      expect.fail('Expected SlackError to be thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(SlackError);
+      const slackErr = err as InstanceType<typeof SlackError>;
+      expect(slackErr.message).toBe('Failed to post report header');
+      expect(slackErr.context).toEqual({ channelId: 'C999', reportType: 'inventory' });
+      expect(slackErr.operation).toBe('postReport');
+      expect(slackErr.cause).toBeInstanceOf(Error);
+      expect((slackErr.cause as Error).message).toBe('channel_not_found');
+    }
+  });
+
+  it('finding thread failure with non-Error value logs stringified warning', async () => {
+    const report = makeReport({
+      findings: [
+        {
+          title: 'High issue',
+          severity: 'high',
+          category: 'security',
+          description: 'desc',
+          affectedDeviceCount: 1,
+          affectedDevices: [{ name: 'mac1', id: '1', detail: 'test' }],
+          remediation: { title: 'Fix', steps: [], effort: 'low', automatable: false },
+        },
+      ],
+    });
+
+    // Header succeeds, finding thread rejects with a non-Error value
+    mockPostMessage
+      .mockResolvedValueOnce({ ok: true, ts: '123.456' })
+      .mockRejectedValueOnce('string_error');
+
+    const client = new SlackClient('xoxb-test');
+    await client.postReport('C123', report, 'security');
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to post finding thread: High issue'),
+      expect.objectContaining({ error: 'string_error' }),
+    );
   });
 });

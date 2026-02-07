@@ -124,7 +124,7 @@ describe('loadConfigSync', () => {
     process.env = originalEnv;
   });
 
-  it('works without secrets', async () => {
+  it('works without secrets support', async () => {
     process.env.MCP_TRANSPORT = 'http';
     process.env.MCP_SERVER_URL = 'http://localhost:3001/mcp';
 
@@ -132,5 +132,43 @@ describe('loadConfigSync', () => {
     const config = loadConfigSync();
 
     expect(config.mcp.transport).toBe('http');
+    expect(config.mcp.serverUrl).toBe('http://localhost:3001/mcp');
+    // Verify defaults are applied
+    expect(config.bedrock.region).toBe('us-east-1');
+    expect(config.scheduler.enabled).toBe(false);
+  });
+
+  it('throws ConfigError on invalid config', async () => {
+    // stdio mode without required fields
+    process.env.MCP_TRANSPORT = 'stdio';
+    // Deliberately omit MCP_SERVER_PATH, JAMF_URL, etc.
+
+    const { loadConfigSync } = await import('./config.js');
+    const { ConfigError } = await import('./errors.js');
+
+    expect(() => loadConfigSync()).toThrow(ConfigError);
+  });
+});
+
+describe('HTTP mode validation', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('throws validation error when MCP_SERVER_URL is missing in http mode', async () => {
+    process.env.MCP_TRANSPORT = 'http';
+    // Deliberately omit MCP_SERVER_URL
+
+    const { loadConfig } = await import('./config.js');
+    const { ConfigError } = await import('./errors.js');
+
+    await expect(loadConfig()).rejects.toThrow(ConfigError);
   });
 });

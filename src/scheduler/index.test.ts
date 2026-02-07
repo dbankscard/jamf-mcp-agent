@@ -145,4 +145,67 @@ describe('getRunningJobs', () => {
   it('returns empty when no jobs running', () => {
     expect(getRunningJobs()).toEqual([]);
   });
+
+  it('returns running job types during execution', async () => {
+    let capturedRunning: string[] = [];
+    const agent = makeAgent();
+    agent.run.mockImplementation(async () => {
+      // Capture running jobs while inside agent.run
+      capturedRunning = getRunningJobs();
+      return {
+        report: { summary: 't', overallStatus: 'healthy', findings: [], metrics: {} },
+        rawText: '{}',
+        toolCallCount: 0,
+        rounds: 1,
+      };
+    });
+
+    await runJob('security', agent, null, undefined);
+
+    // During execution, 'security' should have been in the running list
+    expect(capturedRunning).toContain('security');
+    // After completion, it should be cleared
+    expect(getRunningJobs()).not.toContain('security');
+  });
+});
+
+describe('runJob — no structured report', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('logs warning and prints rawText when no structured report', async () => {
+    const agent = makeAgent({
+      report: null,
+      rawText: 'raw output text here',
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runJob('compliance', agent, null, undefined);
+
+    // Should print rawText to console since report is null
+    expect(consoleSpy).toHaveBeenCalledWith('raw output text here');
+    consoleSpy.mockRestore();
+  });
+});
+
+describe('runJob — Slack postError failure', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('catches Slack postError failure silently', async () => {
+    const agent = makeAgent();
+    agent.run.mockRejectedValue(new Error('agent exploded'));
+
+    const slack = makeSlack();
+    // postError itself throws
+    slack.postError.mockRejectedValue(new Error('Slack is down'));
+
+    // This should NOT throw even though postError fails
+    await expect(runJob('compliance', agent, slack, 'C123')).resolves.toBeUndefined();
+  });
 });
