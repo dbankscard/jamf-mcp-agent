@@ -35,7 +35,7 @@ The agent connects to a [Jamf MCP Server](https://github.com/jamf/jamf-mcp-serve
 
 ```bash
 # Clone
-git clone https://github.com/dbanks/jamf-mcp-agent.git
+git clone https://github.com/dbankscard/jamf-mcp-agent.git
 cd jamf-mcp-agent
 
 # Install dependencies
