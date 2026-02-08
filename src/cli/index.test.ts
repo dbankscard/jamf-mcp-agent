@@ -6,11 +6,14 @@ const mockLoadConfig = vi.fn();
 const mockMCPConnect = vi.fn();
 const mockMCPDisconnect = vi.fn();
 const mockAgentRun = vi.fn();
+const mockAgentRunRemediation = vi.fn();
 const mockRunJob = vi.fn();
 const mockStartScheduler = vi.fn();
 const mockOnShutdown = vi.fn();
 const mockInstall = vi.fn();
 const mockGetHealthStatus = vi.fn();
+const mockPostRemediationReport = vi.fn();
+const mockRecordRemediation = vi.fn();
 
 // ── Track Commander action handlers ────────────────────────────────────
 
@@ -62,6 +65,7 @@ vi.mock('../claude/agent.js', () => ({
   Agent: class {
     constructor() {}
     run = mockAgentRun;
+    runRemediation = mockAgentRunRemediation;
   },
 }));
 
@@ -70,12 +74,15 @@ vi.mock('../slack/client.js', () => ({
     constructor() {}
     postReport = vi.fn();
     postError = vi.fn();
+    postRemediationReport = mockPostRemediationReport;
   },
 }));
 
 vi.mock('../claude/prompts.js', () => ({
   getSystemPrompt: vi.fn((type: string) => `system-prompt-for-${type}`),
   getUserMessage: vi.fn((type: string) => `user-message-for-${type}`),
+  getRemediationPrompt: vi.fn((dryRun: boolean) => `remediation-prompt-dryrun-${dryRun}`),
+  buildRemediationUserMessage: vi.fn(() => 'remediation-user-message'),
 }));
 
 vi.mock('../scheduler/index.js', () => ({
@@ -95,6 +102,18 @@ vi.mock('../health.js', () => ({
     constructor() {}
     getHealthStatus = mockGetHealthStatus;
   },
+}));
+
+vi.mock('../metrics.js', () => ({
+  recordRemediation: (...args: any[]) => mockRecordRemediation(...args),
+}));
+
+vi.mock('node:fs', () => ({
+  readFileSync: vi.fn(),
+}));
+
+vi.mock('node:readline', () => ({
+  createInterface: vi.fn(),
 }));
 
 vi.mock('../logger.js', () => ({
@@ -194,6 +213,7 @@ describe('CLI module', () => {
     expect(capturedActions).toHaveProperty('ask');
     expect(capturedActions).toHaveProperty('start');
     expect(capturedActions).toHaveProperty('health');
+    expect(capturedActions).toHaveProperty('remediate');
     expect(parseCalled).toBe(true);
   });
 });
@@ -205,7 +225,7 @@ describe('boot() via commands', () => {
     mockMCPConnect.mockResolvedValue(undefined);
     mockAgentRun.mockResolvedValue({ report: null, rawText: 'hello', toolCallCount: 0, rounds: 1 });
 
-    await capturedActions.ask('test question');
+    await capturedActions.ask('test question', {});
 
     expect(mockLoadConfig).toHaveBeenCalledTimes(1);
     expect(mockMCPConnect).toHaveBeenCalledTimes(1);
@@ -217,7 +237,7 @@ describe('boot() via commands', () => {
     mockMCPConnect.mockResolvedValue(undefined);
     mockAgentRun.mockResolvedValue({ report: null, rawText: 'hello', toolCallCount: 0, rounds: 1 });
 
-    await capturedActions.ask('test question');
+    await capturedActions.ask('test question', {});
 
     expect(mockLoadConfig).toHaveBeenCalledTimes(1);
     expect(mockMCPConnect).toHaveBeenCalledTimes(1);
@@ -353,7 +373,7 @@ describe('ask command', () => {
     const report = { summary: 'ok', overallStatus: 'healthy', findings: [], metrics: {} };
     mockAgentRun.mockResolvedValue({ report, rawText: '{}', toolCallCount: 1, rounds: 1 });
 
-    await capturedActions.ask('what is the fleet status?');
+    await capturedActions.ask('what is the fleet status?', {});
 
     expect(mockAgentRun).toHaveBeenCalledWith(
       'system-prompt-for-adhoc',
@@ -369,7 +389,7 @@ describe('ask command', () => {
 
     mockAgentRun.mockResolvedValue({ report: null, rawText: 'plain answer', toolCallCount: 0, rounds: 1 });
 
-    await capturedActions.ask('how many devices?');
+    await capturedActions.ask('how many devices?', {});
 
     expect(mockConsoleLog).toHaveBeenCalledWith('plain answer');
   });
@@ -380,7 +400,7 @@ describe('ask command', () => {
     mockMCPConnect.mockResolvedValue(undefined);
     mockAgentRun.mockResolvedValue({ report: null, rawText: 'ok', toolCallCount: 0, rounds: 1 });
 
-    await capturedActions.ask('test');
+    await capturedActions.ask('test', {});
 
     expect(mockMCPDisconnect).toHaveBeenCalledTimes(1);
   });
@@ -391,9 +411,35 @@ describe('ask command', () => {
     mockMCPConnect.mockResolvedValue(undefined);
     mockAgentRun.mockRejectedValue(new Error('agent boom'));
 
-    await expect(capturedActions.ask('test')).rejects.toThrow('agent boom');
+    await expect(capturedActions.ask('test', {})).rejects.toThrow('agent boom');
 
     expect(mockMCPDisconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it('boots in read-only mode by default (no --write flag)', async () => {
+    const { logger } = await import('../logger.js');
+    const config = makeConfig();
+    mockLoadConfig.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+    mockAgentRun.mockResolvedValue({ report: null, rawText: 'ok', toolCallCount: 0, rounds: 1 });
+
+    await capturedActions.ask('test', {});
+
+    expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('boots in write mode with --write flag and logs warning', async () => {
+    const { logger } = await import('../logger.js');
+    const config = makeConfig();
+    mockLoadConfig.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+    mockAgentRun.mockResolvedValue({ report: null, rawText: 'ok', toolCallCount: 0, rounds: 1 });
+
+    await capturedActions.ask('test', { write: true });
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Write mode enabled'),
+    );
   });
 });
 
@@ -496,6 +542,272 @@ describe('health command', () => {
 
     // boot() threw, so mcp stays null in the health action -- disconnect should not be called
     expect(mockMCPDisconnect).not.toHaveBeenCalled();
+  });
+});
+
+describe('remediate command', () => {
+  const mockExit = vi.spyOn(process, 'exit').mockImplementation((() => {}) as any);
+  const mockConsoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const mockConsoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+  beforeEach(() => {
+    mockExit.mockClear();
+    mockConsoleError.mockClear();
+    mockConsoleLog.mockClear();
+    mockRecordRemediation.mockResolvedValue(undefined);
+  });
+
+  it('registers remediate command', () => {
+    expect(capturedActions).toHaveProperty('remediate');
+  });
+
+  it('exits with error when no type and no --file', async () => {
+    await capturedActions.remediate(undefined, {});
+
+    expect(mockConsoleError).toHaveBeenCalledWith(
+      expect.stringContaining('Provide a report type'),
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('exits with error for invalid report type', async () => {
+    await capturedActions.remediate('invalid', {});
+
+    expect(mockConsoleError).toHaveBeenCalledWith(
+      expect.stringContaining('Unknown report type: invalid'),
+    );
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('outputs no-findings message when report has empty findings', async () => {
+    const config = makeConfig();
+    mockLoadConfig.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+    mockAgentRun.mockResolvedValue({
+      report: {
+        summary: 'All good',
+        overallStatus: 'healthy',
+        findings: [],
+        metrics: {},
+      },
+      rawText: '{}',
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    await capturedActions.remediate('compliance', { autoApprove: true });
+
+    expect(mockConsoleLog).toHaveBeenCalledWith(
+      expect.stringContaining('No findings to remediate'),
+    );
+  });
+
+  it('runs dry-run remediation with auto-approve', async () => {
+    const config = makeConfig();
+    mockLoadConfig.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+
+    const finding = {
+      title: 'Outdated OS',
+      severity: 'high',
+      category: 'compliance',
+      description: 'Old OS',
+      affectedDeviceCount: 3,
+      affectedDevices: [],
+      remediation: { title: 'Update', steps: ['update'], effort: 'low', automatable: true },
+    };
+
+    // First boot: analysis
+    mockAgentRun.mockResolvedValue({
+      report: {
+        summary: 'Issues found',
+        overallStatus: 'warning',
+        findings: [finding],
+        metrics: {},
+      },
+      rawText: '{}',
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    // Second boot: remediation
+    const remReport = {
+      summary: 'Would remediate 1 finding',
+      originalReportStatus: 'warning',
+      findingsAttempted: 1,
+      findingsSucceeded: 1,
+      findingsFailed: 0,
+      actions: [],
+      dryRun: true,
+    };
+    mockAgentRunRemediation.mockResolvedValue({
+      report: remReport,
+      rawText: JSON.stringify(remReport),
+      toolCallCount: 0,
+      rounds: 1,
+    });
+
+    await capturedActions.remediate('compliance', { dryRun: true, autoApprove: true });
+
+    expect(mockConsoleLog).toHaveBeenCalledWith(JSON.stringify(remReport, null, 2));
+    expect(mockMCPDisconnect).toHaveBeenCalled();
+  });
+
+  it('filters findings by --finding indices', async () => {
+    const config = makeConfig();
+    mockLoadConfig.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+
+    const findings = [
+      {
+        title: 'Finding A',
+        severity: 'critical',
+        category: 'security',
+        description: 'desc',
+        affectedDeviceCount: 1,
+        affectedDevices: [],
+        remediation: { title: 'Fix A', steps: [], effort: 'low', automatable: true },
+      },
+      {
+        title: 'Finding B',
+        severity: 'low',
+        category: 'compliance',
+        description: 'desc',
+        affectedDeviceCount: 1,
+        affectedDevices: [],
+        remediation: { title: 'Fix B', steps: [], effort: 'low', automatable: false },
+      },
+    ];
+
+    mockAgentRun.mockResolvedValue({
+      report: {
+        summary: 'Issues',
+        overallStatus: 'critical',
+        findings,
+        metrics: {},
+      },
+      rawText: '{}',
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    const remReport = {
+      summary: 'Fixed',
+      originalReportStatus: 'critical',
+      findingsAttempted: 1,
+      findingsSucceeded: 1,
+      findingsFailed: 0,
+      actions: [],
+      dryRun: false,
+    };
+    mockAgentRunRemediation.mockResolvedValue({
+      report: remReport,
+      rawText: JSON.stringify(remReport),
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    await capturedActions.remediate('security', { finding: '0' });
+
+    expect(mockAgentRunRemediation).toHaveBeenCalledTimes(1);
+    expect(mockConsoleLog).toHaveBeenCalledWith(JSON.stringify(remReport, null, 2));
+  });
+
+  it('auto-approve filters by severity and automatable', async () => {
+    const config = makeConfig();
+    mockLoadConfig.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+
+    const findings = [
+      {
+        title: 'Critical Auto',
+        severity: 'critical',
+        category: 'security',
+        description: 'desc',
+        affectedDeviceCount: 1,
+        affectedDevices: [],
+        remediation: { title: 'Fix', steps: [], effort: 'low', automatable: true },
+      },
+      {
+        title: 'Low Manual',
+        severity: 'low',
+        category: 'compliance',
+        description: 'desc',
+        affectedDeviceCount: 1,
+        affectedDevices: [],
+        remediation: { title: 'Fix', steps: [], effort: 'low', automatable: false },
+      },
+    ];
+
+    mockAgentRun.mockResolvedValue({
+      report: {
+        summary: 'Issues',
+        overallStatus: 'critical',
+        findings,
+        metrics: {},
+      },
+      rawText: '{}',
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    const remReport = {
+      summary: 'Fixed',
+      originalReportStatus: 'critical',
+      findingsAttempted: 1,
+      findingsSucceeded: 1,
+      findingsFailed: 0,
+      actions: [],
+      dryRun: false,
+    };
+    mockAgentRunRemediation.mockResolvedValue({
+      report: remReport,
+      rawText: JSON.stringify(remReport),
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    // Only critical severity, auto-approve — should pick index 0 (critical + automatable)
+    await capturedActions.remediate('security', { autoApprove: true, minSeverity: 'critical' });
+
+    expect(mockAgentRunRemediation).toHaveBeenCalledTimes(1);
+  });
+
+  it('outputs rawText when remediation report is null', async () => {
+    const config = makeConfig();
+    mockLoadConfig.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+
+    mockAgentRun.mockResolvedValue({
+      report: {
+        summary: 'Issues',
+        overallStatus: 'warning',
+        findings: [{
+          title: 'Issue',
+          severity: 'high',
+          category: 'compliance',
+          description: 'desc',
+          affectedDeviceCount: 1,
+          affectedDevices: [],
+          remediation: { title: 'Fix', steps: [], effort: 'low', automatable: true },
+        }],
+        metrics: {},
+      },
+      rawText: '{}',
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    mockAgentRunRemediation.mockResolvedValue({
+      report: null,
+      rawText: 'plain text result',
+      toolCallCount: 0,
+      rounds: 1,
+    });
+
+    await capturedActions.remediate('compliance', { autoApprove: true });
+
+    expect(mockConsoleLog).toHaveBeenCalledWith('plain text result');
   });
 });
 

@@ -1,6 +1,6 @@
 import { WebClient } from '@slack/web-api';
-import { AgentReport } from '../claude/types.js';
-import { buildReportHeader, buildFindingBlocks, buildErrorBlocks } from './templates.js';
+import { AgentReport, RemediationReport } from '../claude/types.js';
+import { buildReportHeader, buildFindingBlocks, buildErrorBlocks, buildRemediationHeader, buildRemediationActionBlocks } from './templates.js';
 import { logger } from '../logger.js';
 import { SlackError } from '../errors.js';
 import { recordSlackPost } from '../metrics.js';
@@ -81,6 +81,57 @@ export class SlackClient {
     }
 
     logger.info(`Posted report to Slack channel ${channelId}`);
+  }
+
+  /**
+   * Post a remediation report: summary header in the channel, then each
+   * action as a threaded reply.
+   */
+  async postRemediationReport(channelId: string, report: RemediationReport): Promise<void> {
+    const headerBlocks = buildRemediationHeader(report);
+    const mode = report.dryRun ? 'Dry Run' : 'Remediation';
+
+    let headerResult;
+    const start = Date.now();
+    try {
+      headerResult = await this.web.chat.postMessage({
+        channel: channelId,
+        blocks: headerBlocks as any,
+        text: `${mode}: ${report.summary}`,
+      });
+      recordSlackPost(Date.now() - start, false).catch(() => {});
+    } catch (err) {
+      recordSlackPost(Date.now() - start, true).catch(() => {});
+      throw new SlackError('Failed to post remediation header', {
+        operation: 'postRemediationReport',
+        context: { channelId },
+        cause: err instanceof Error ? err : new Error(String(err)),
+      });
+    }
+
+    const threadTs = headerResult.ts;
+    if (!threadTs) {
+      logger.warn('Could not get thread ts from remediation header message');
+      return;
+    }
+
+    for (const action of report.actions) {
+      const blocks = buildRemediationActionBlocks(action);
+      try {
+        await this.web.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          blocks: blocks as any,
+          text: `[${action.status.toUpperCase()}] ${action.findingTitle}`,
+        });
+      } catch (err) {
+        logger.warn(`Failed to post remediation action thread: ${action.findingTitle}`, {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    logger.info(`Posted remediation report to Slack channel ${channelId}`);
   }
 
   async postError(channelId: string, error: string, context: string): Promise<void> {

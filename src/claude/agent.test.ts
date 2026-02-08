@@ -433,6 +433,150 @@ describe('Agent', () => {
     });
   });
 
+  describe('runRemediation', () => {
+    it('parses a valid remediation report', async () => {
+      const remReport = JSON.stringify({
+        summary: 'Remediated 2 findings',
+        originalReportStatus: 'warning',
+        findingsAttempted: 2,
+        findingsSucceeded: 2,
+        findingsFailed: 0,
+        actions: [
+          {
+            findingIndex: 0,
+            findingTitle: 'Outdated OS',
+            action: 'Created software update plan',
+            toolsUsed: ['createSoftwareUpdatePlan'],
+            status: 'success',
+            devicesRemediated: 5,
+            details: 'Scheduled updates for 5 devices',
+          },
+        ],
+        dryRun: false,
+      });
+
+      mockSend.mockResolvedValue({
+        output: {
+          message: { content: [{ text: remReport }] },
+        },
+        stopReason: 'end_turn',
+      });
+
+      const mcp = makeMCPClient();
+      const agent = new Agent(mcp, {
+        model: 'test-model',
+        maxToolRounds: 5,
+        region: 'us-east-1',
+      });
+
+      const result = await agent.runRemediation('system', 'user');
+      expect(result.report).not.toBeNull();
+      expect(result.report?.findingsAttempted).toBe(2);
+      expect(result.report?.findingsSucceeded).toBe(2);
+      expect(result.report?.actions).toHaveLength(1);
+      expect(result.report?.actions[0].status).toBe('success');
+    });
+
+    it('returns null report for non-remediation JSON', async () => {
+      mockSend.mockResolvedValue({
+        output: {
+          message: { content: [{ text: '{"summary":"test","overallStatus":"healthy","findings":[]}' }] },
+        },
+        stopReason: 'end_turn',
+      });
+
+      const mcp = makeMCPClient();
+      const agent = new Agent(mcp, {
+        model: 'test-model',
+        maxToolRounds: 5,
+        region: 'us-east-1',
+      });
+
+      const result = await agent.runRemediation('system', 'user');
+      expect(result.report).toBeNull();
+    });
+
+    it('returns null report for empty text', async () => {
+      mockSend.mockResolvedValue({
+        output: {
+          message: { content: [{ text: '   ' }] },
+        },
+        stopReason: 'end_turn',
+      });
+
+      const mcp = makeMCPClient();
+      const agent = new Agent(mcp, {
+        model: 'test-model',
+        maxToolRounds: 5,
+        region: 'us-east-1',
+      });
+
+      const result = await agent.runRemediation('system', 'user');
+      expect(result.report).toBeNull();
+    });
+
+    it('handles remediation report wrapped in markdown fences', async () => {
+      const json = JSON.stringify({
+        summary: 'Done',
+        originalReportStatus: 'critical',
+        findingsAttempted: 1,
+        findingsSucceeded: 0,
+        findingsFailed: 1,
+        actions: [],
+        dryRun: true,
+      });
+
+      mockSend.mockResolvedValue({
+        output: {
+          message: { content: [{ text: `\`\`\`json\n${json}\n\`\`\`` }] },
+        },
+        stopReason: 'end_turn',
+      });
+
+      const mcp = makeMCPClient();
+      const agent = new Agent(mcp, {
+        model: 'test-model',
+        maxToolRounds: 5,
+        region: 'us-east-1',
+      });
+
+      const result = await agent.runRemediation('system', 'user');
+      expect(result.report?.dryRun).toBe(true);
+      expect(result.report?.findingsFailed).toBe(1);
+    });
+
+    it('preserves rawText and round counts', async () => {
+      const remReport = JSON.stringify({
+        summary: 'ok',
+        originalReportStatus: 'healthy',
+        findingsAttempted: 0,
+        findingsSucceeded: 0,
+        findingsFailed: 0,
+        actions: [],
+        dryRun: true,
+      });
+
+      mockSend.mockResolvedValue({
+        output: {
+          message: { content: [{ text: remReport }] },
+        },
+        stopReason: 'end_turn',
+      });
+
+      const mcp = makeMCPClient();
+      const agent = new Agent(mcp, {
+        model: 'test-model',
+        maxToolRounds: 5,
+        region: 'us-east-1',
+      });
+
+      const result = await agent.runRemediation('system', 'user');
+      expect(result.rawText).toBe(remReport);
+      expect(result.rounds).toBe(1);
+      expect(result.toolCallCount).toBe(0);
+    });
+  });
+
   describe('tool_use stopReason with no toolUseBlocks', () => {
     it('returns rawText as done when stopReason is not end_turn but no tool blocks', async () => {
       // Bedrock returns stopReason that is not end_turn, but the content

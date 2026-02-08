@@ -1,4 +1,4 @@
-import type { AgentReport, Finding } from '../claude/types.js';
+import type { AgentReport, Finding, RemediationReport, RemediationAction } from '../claude/types.js';
 
 type Block = Record<string, unknown>;
 
@@ -111,6 +111,89 @@ export function buildFindingBlocks(finding: Finding): Block[] {
     },
     { type: 'divider' },
   ];
+}
+
+const ACTION_STATUS_EMOJI: Record<string, string> = {
+  success: ':white_check_mark:',
+  partial: ':large_yellow_circle:',
+  failed: ':red_circle:',
+  skipped: ':fast_forward:',
+};
+
+export function buildRemediationHeader(report: RemediationReport): Block[] {
+  const statusEmoji = report.dryRun
+    ? ':memo:'
+    : report.findingsFailed === 0
+      ? ':white_check_mark:'
+      : report.findingsSucceeded > 0
+        ? ':large_yellow_circle:'
+        : ':red_circle:';
+
+  const mode = report.dryRun ? 'Dry Run' : 'Remediation';
+
+  const blocks: Block[] = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: `${mode} Report`, emoji: true },
+    },
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `${statusEmoji} *${mode} Complete*\n\n${report.summary}`,
+      },
+    },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*Attempted:* ${report.findingsAttempted}` },
+        { type: 'mrkdwn', text: `*Succeeded:* ${report.findingsSucceeded}` },
+        { type: 'mrkdwn', text: `*Failed:* ${report.findingsFailed}` },
+        { type: 'mrkdwn', text: `*Actions:* ${report.actions.length}` },
+      ],
+    },
+    { type: 'divider' },
+  ];
+
+  return blocks;
+}
+
+export function buildRemediationActionBlocks(action: RemediationAction): Block[] {
+  const emoji = ACTION_STATUS_EMOJI[action.status] ?? ':grey_question:';
+  const tools = action.toolsUsed.length > 0
+    ? action.toolsUsed.map(t => `\`${t}\``).join(', ')
+    : '_none_';
+
+  const blocks: Block[] = [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `${emoji} *[${action.status.toUpperCase()}] ${action.findingTitle}*\n\n${action.details}`,
+      },
+    },
+    {
+      type: 'section',
+      fields: [
+        { type: 'mrkdwn', text: `*Tools:* ${tools}` },
+        { type: 'mrkdwn', text: `*Devices remediated:* ${action.devicesRemediated}` },
+      ],
+    },
+  ];
+
+  if (action.error) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:warning: *Error:* ${action.error}`,
+      },
+    });
+  }
+
+  blocks.push({ type: 'divider' });
+
+  return blocks;
 }
 
 export function buildErrorBlocks(error: string, context: string): Block[] {

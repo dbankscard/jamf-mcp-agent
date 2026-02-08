@@ -87,3 +87,162 @@ export function getUserMessage(type: ReportType, extra?: string): string {
   };
   return messages[type];
 }
+
+const REMEDIATION_SCHEMA_INSTRUCTION = `
+You MUST output your final answer as a single JSON object with this exact schema (no markdown fences):
+{
+  "summary": "<1-3 sentence summary of remediation results>",
+  "originalReportStatus": "healthy" | "warning" | "critical",
+  "findingsAttempted": <number>,
+  "findingsSucceeded": <number>,
+  "findingsFailed": <number>,
+  "actions": [
+    {
+      "findingIndex": <original finding index>,
+      "findingTitle": "<original finding title>",
+      "action": "<what was done>",
+      "toolsUsed": ["<tool1>", "<tool2>"],
+      "status": "success" | "partial" | "failed" | "skipped",
+      "devicesRemediated": <number>,
+      "details": "<detailed description of what happened>",
+      "error": "<error message, only if status is failed or partial>"
+    }
+  ],
+  "dryRun": <boolean>
+}
+
+Rules:
+- One action entry per finding attempted.
+- Set status to "success" only if all affected devices were remediated.
+- Set status to "partial" if some but not all devices were remediated.
+- Set status to "skipped" if the finding cannot be remediated automatically.
+- Include the error field only when status is "failed" or "partial".
+`;
+
+/**
+ * All write/mutating Jamf MCP tools, grouped by category.
+ * Exported for testing — prompts reference every tool so the agent knows its full remediation surface.
+ */
+export const WRITE_TOOLS_BY_CATEGORY: Record<string, string[]> = {
+  'Policy Management': [
+    'executePolicy',
+    'createPolicy',
+    'updatePolicy',
+    'clonePolicy',
+    'setPolicyEnabled',
+    'updatePolicyScope',
+  ],
+  'Configuration Profiles': [
+    'deployConfigurationProfile',
+    'removeConfigurationProfile',
+  ],
+  'Software Updates': [
+    'createSoftwareUpdatePlan',
+  ],
+  'MDM Commands': [
+    'sendComputerMDMCommand',
+    'sendMDMCommand',
+    'flushMDMCommands',
+  ],
+  'Scripts': [
+    'deployScript',
+    'createScript',
+    'updateScript',
+    'deleteScript',
+  ],
+  'Groups & Searches': [
+    'createStaticComputerGroup',
+    'updateStaticComputerGroup',
+    'deleteComputerGroup',
+    'createAdvancedComputerSearch',
+    'deleteAdvancedComputerSearch',
+  ],
+  'Inventory & Attributes': [
+    'updateInventory',
+    'updateMobileDeviceInventory',
+    'createComputerExtensionAttribute',
+    'updateComputerExtensionAttribute',
+  ],
+};
+
+function buildWriteToolReference(): string {
+  return Object.entries(WRITE_TOOLS_BY_CATEGORY)
+    .map(([category, tools]) => `**${category}:** ${tools.join(', ')}`)
+    .join('\n');
+}
+
+export function getRemediationPrompt(dryRun: boolean): string {
+  const toolReference = buildWriteToolReference();
+
+  if (dryRun) {
+    return `You are a Jamf IT remediation planning agent. Your job is to analyze the provided findings and describe what remediation actions WOULD be taken, without actually executing any write tools.
+
+For each finding, describe:
+- Which Jamf tools would be used
+- What parameters would be passed
+- How many devices would be affected
+- Any risks or prerequisites
+
+Available write tools by category:
+${toolReference}
+
+Do NOT call any write/mutating tools. Only use read tools if you need additional context.
+
+Set dryRun to true in your output.
+
+${REMEDIATION_SCHEMA_INSTRUCTION}`;
+  }
+
+  return `You are a Jamf IT remediation agent. Your job is to fix the provided findings by calling the appropriate Jamf write tools.
+
+Available write tools by category:
+${toolReference}
+
+For each finding, determine the best remediation approach and execute it. Common patterns:
+- executePolicy to trigger existing policies on specific devices
+- deployConfigurationProfile to push security/compliance profiles
+- createSoftwareUpdatePlan to schedule OS updates
+- sendComputerMDMCommand / sendMDMCommand to send MDM commands (e.g., EnableRemoteDesktop, RefreshCertificate)
+- deployScript to run scripts on devices
+- createStaticComputerGroup to organize devices for targeted actions
+- updatePolicy / updatePolicyScope to adjust policy targeting
+- setPolicyEnabled to enable/disable policies
+- createPolicy / clonePolicy to create new policies from scratch or existing ones
+- updateInventory / updateMobileDeviceInventory to refresh device inventory
+- createComputerExtensionAttribute / updateComputerExtensionAttribute to track custom data
+- removeConfigurationProfile to remove unwanted profiles
+- flushMDMCommands to clear pending commands on stuck devices
+- createAdvancedComputerSearch to build device queries for follow-up
+
+IMPORTANT: Always include confirm: true in all write tool calls.
+
+Work through each finding methodically. If a finding cannot be automatically remediated, set its status to "skipped" and explain why.
+
+Set dryRun to false in your output.
+
+${REMEDIATION_SCHEMA_INSTRUCTION}`;
+}
+
+export function buildRemediationUserMessage(
+  findings: import('./types.js').Finding[],
+  selectedIndices: number[],
+): string {
+  const selected = selectedIndices
+    .map(i => {
+      const f = findings[i];
+      if (!f) return null;
+      return {
+        index: i,
+        title: f.title,
+        severity: f.severity,
+        category: f.category,
+        description: f.description,
+        affectedDeviceCount: f.affectedDeviceCount,
+        affectedDevices: f.affectedDevices,
+        remediation: f.remediation,
+      };
+    })
+    .filter(Boolean);
+
+  return `Remediate the following ${selected.length} finding(s):\n\n${JSON.stringify(selected, null, 2)}`;
+}

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { buildReportHeader, buildFindingBlocks, buildErrorBlocks } from './templates.js';
-import type { AgentReport, Finding, AffectedDevice } from '../claude/types.js';
+import { buildReportHeader, buildFindingBlocks, buildErrorBlocks, buildRemediationHeader, buildRemediationActionBlocks } from './templates.js';
+import type { AgentReport, Finding, AffectedDevice, RemediationReport, RemediationAction } from '../claude/types.js';
 
 function makeDevice(n: number): AffectedDevice {
   return { name: `device-${n}`, id: `id-${n}`, detail: `detail-${n}` };
@@ -329,6 +329,176 @@ describe('buildFindingBlocks', () => {
 
   it('always ends with a divider block', () => {
     const blocks = buildFindingBlocks(makeFinding());
+    expect(blocks[blocks.length - 1]).toEqual({ type: 'divider' });
+  });
+});
+
+function makeRemediationReport(overrides: Partial<RemediationReport> = {}): RemediationReport {
+  return {
+    summary: 'Remediated 2 findings successfully.',
+    originalReportStatus: 'warning',
+    findingsAttempted: 2,
+    findingsSucceeded: 2,
+    findingsFailed: 0,
+    actions: [],
+    dryRun: false,
+    ...overrides,
+  };
+}
+
+function makeRemediationAction(overrides: Partial<RemediationAction> = {}): RemediationAction {
+  return {
+    findingIndex: 0,
+    findingTitle: 'Outdated OS',
+    action: 'Created software update plan',
+    toolsUsed: ['createSoftwareUpdatePlan'],
+    status: 'success',
+    devicesRemediated: 5,
+    details: 'Scheduled updates for 5 devices.',
+    ...overrides,
+  };
+}
+
+describe('buildRemediationHeader', () => {
+  it('shows checkmark for all-success report', () => {
+    const blocks = buildRemediationHeader(makeRemediationReport({ findingsFailed: 0 }));
+    const statusBlock = blocks[1] as Record<string, any>;
+    expect(statusBlock.text.text).toContain(':white_check_mark:');
+  });
+
+  it('shows yellow for partial success', () => {
+    const blocks = buildRemediationHeader(makeRemediationReport({ findingsSucceeded: 1, findingsFailed: 1 }));
+    const statusBlock = blocks[1] as Record<string, any>;
+    expect(statusBlock.text.text).toContain(':large_yellow_circle:');
+  });
+
+  it('shows red for all-failed', () => {
+    const blocks = buildRemediationHeader(makeRemediationReport({ findingsSucceeded: 0, findingsFailed: 2 }));
+    const statusBlock = blocks[1] as Record<string, any>;
+    expect(statusBlock.text.text).toContain(':red_circle:');
+  });
+
+  it('shows memo for dry-run', () => {
+    const blocks = buildRemediationHeader(makeRemediationReport({ dryRun: true }));
+    const statusBlock = blocks[1] as Record<string, any>;
+    expect(statusBlock.text.text).toContain(':memo:');
+    expect(statusBlock.text.text).toContain('Dry Run');
+  });
+
+  it('includes title with "Remediation Report"', () => {
+    const blocks = buildRemediationHeader(makeRemediationReport());
+    const header = blocks[0] as Record<string, any>;
+    expect(header.text.text).toBe('Remediation Report');
+  });
+
+  it('includes title with "Dry Run Report" for dry-run', () => {
+    const blocks = buildRemediationHeader(makeRemediationReport({ dryRun: true }));
+    const header = blocks[0] as Record<string, any>;
+    expect(header.text.text).toBe('Dry Run Report');
+  });
+
+  it('includes summary text', () => {
+    const blocks = buildRemediationHeader(makeRemediationReport({ summary: 'All done.' }));
+    const statusBlock = blocks[1] as Record<string, any>;
+    expect(statusBlock.text.text).toContain('All done.');
+  });
+
+  it('includes counts in fields', () => {
+    const report = makeRemediationReport({
+      findingsAttempted: 3,
+      findingsSucceeded: 2,
+      findingsFailed: 1,
+      actions: [makeRemediationAction(), makeRemediationAction()],
+    });
+    const blocks = buildRemediationHeader(report);
+    const countsBlock = blocks[2] as Record<string, any>;
+    expect(countsBlock.fields[0].text).toContain('3');
+    expect(countsBlock.fields[1].text).toContain('2');
+    expect(countsBlock.fields[2].text).toContain('1');
+    expect(countsBlock.fields[3].text).toContain('2');
+  });
+
+  it('ends with a divider', () => {
+    const blocks = buildRemediationHeader(makeRemediationReport());
+    expect(blocks[blocks.length - 1]).toEqual({ type: 'divider' });
+  });
+});
+
+describe('buildRemediationActionBlocks', () => {
+  it('shows checkmark for success', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction({ status: 'success' }));
+    const section = blocks[0] as Record<string, any>;
+    expect(section.text.text).toContain(':white_check_mark:');
+    expect(section.text.text).toContain('[SUCCESS]');
+  });
+
+  it('shows yellow for partial', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction({ status: 'partial' }));
+    const section = blocks[0] as Record<string, any>;
+    expect(section.text.text).toContain(':large_yellow_circle:');
+  });
+
+  it('shows red for failed', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction({ status: 'failed' }));
+    const section = blocks[0] as Record<string, any>;
+    expect(section.text.text).toContain(':red_circle:');
+  });
+
+  it('shows fast_forward for skipped', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction({ status: 'skipped' }));
+    const section = blocks[0] as Record<string, any>;
+    expect(section.text.text).toContain(':fast_forward:');
+  });
+
+  it('includes finding title and details', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction({
+      findingTitle: 'Missing Encryption',
+      details: 'Deployed FileVault profile.',
+    }));
+    const section = blocks[0] as Record<string, any>;
+    expect(section.text.text).toContain('Missing Encryption');
+    expect(section.text.text).toContain('Deployed FileVault profile.');
+  });
+
+  it('formats tools as code blocks', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction({
+      toolsUsed: ['executePolicy', 'sendComputerMDMCommand'],
+    }));
+    const fieldsBlock = blocks[1] as Record<string, any>;
+    expect(fieldsBlock.fields[0].text).toContain('`executePolicy`');
+    expect(fieldsBlock.fields[0].text).toContain('`sendComputerMDMCommand`');
+  });
+
+  it('shows "_none_" when no tools used', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction({ toolsUsed: [] }));
+    const fieldsBlock = blocks[1] as Record<string, any>;
+    expect(fieldsBlock.fields[0].text).toContain('_none_');
+  });
+
+  it('shows devices remediated count', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction({ devicesRemediated: 42 }));
+    const fieldsBlock = blocks[1] as Record<string, any>;
+    expect(fieldsBlock.fields[1].text).toContain('42');
+  });
+
+  it('includes error block when error is present', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction({
+      status: 'failed',
+      error: 'Policy not found',
+    }));
+    const errorBlock = blocks[2] as Record<string, any>;
+    expect(errorBlock.text.text).toContain(':warning:');
+    expect(errorBlock.text.text).toContain('Policy not found');
+  });
+
+  it('does not include error block when no error', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction({ error: undefined }));
+    // Should be: section, fields, divider (3 blocks, no error block)
+    expect(blocks).toHaveLength(3);
+  });
+
+  it('ends with a divider', () => {
+    const blocks = buildRemediationActionBlocks(makeRemediationAction());
     expect(blocks[blocks.length - 1]).toEqual({ type: 'divider' });
   });
 });

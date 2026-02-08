@@ -62,6 +62,22 @@ export async function recordSchedulerJob(
   });
 }
 
+export async function recordRemediation(
+  durationMs: number,
+  findingsAttempted: number,
+  findingsSucceeded: number,
+  dryRun: boolean,
+): Promise<void> {
+  await withMetrics(m => {
+    m.putMetric('remediation.duration', durationMs, Unit.Milliseconds);
+    m.putMetric('remediation.findings_attempted', findingsAttempted, Unit.Count);
+    m.putMetric('remediation.findings_succeeded', findingsSucceeded, Unit.Count);
+    if (dryRun) {
+      m.putMetric('remediation.dry_run', 1, Unit.Count);
+    }
+  });
+}
+
 export async function recordSlackPost(
   durationMs: number,
   error: boolean,

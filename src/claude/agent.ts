@@ -10,7 +10,7 @@ import {
 } from '@aws-sdk/client-bedrock-runtime';
 import { MCPClient } from '../mcp/client.js';
 import { mapTools } from '../mcp/tool-mapper.js';
-import { AgentResult, AgentReport } from './types.js';
+import { AgentResult, AgentReport, RemediationResult, RemediationReport } from './types.js';
 import { logger } from '../logger.js';
 import { BedrockError } from '../errors.js';
 import { recordAgentRun } from '../metrics.js';
@@ -59,6 +59,16 @@ export class Agent {
 
   async run(systemPrompt: string, userMessage: string): Promise<AgentResult> {
     return runWithContext(() => this.executeAgentLoop(systemPrompt, userMessage));
+  }
+
+  async runRemediation(systemPrompt: string, userMessage: string): Promise<RemediationResult> {
+    const result = await runWithContext(() => this.executeAgentLoop(systemPrompt, userMessage));
+    return {
+      report: parseRemediationReport(result.rawText),
+      rawText: result.rawText,
+      toolCallCount: result.toolCallCount,
+      rounds: result.rounds,
+    };
   }
 
   private async executeAgentLoop(systemPrompt: string, userMessage: string): Promise<AgentResult> {
@@ -299,6 +309,38 @@ function parseReport(text: string): AgentReport | null {
     const parsed = JSON.parse(json.slice(braceStart, braceEnd + 1));
     if (parsed.summary && parsed.overallStatus && Array.isArray(parsed.findings)) {
       return parsed as AgentReport;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract and parse a JSON RemediationReport from Claude's response text.
+ * Checks for `actions` array and `findingsAttempted` field.
+ */
+function parseRemediationReport(text: string): RemediationReport | null {
+  if (!text.trim()) return null;
+
+  let json = text;
+  const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenceMatch) {
+    json = fenceMatch[1];
+  }
+
+  const braceStart = json.indexOf('{');
+  const braceEnd = json.lastIndexOf('}');
+  if (braceStart === -1 || braceEnd === -1) return null;
+
+  try {
+    const parsed = JSON.parse(json.slice(braceStart, braceEnd + 1));
+    if (
+      parsed.summary &&
+      Array.isArray(parsed.actions) &&
+      typeof parsed.findingsAttempted === 'number'
+    ) {
+      return parsed as RemediationReport;
     }
     return null;
   } catch {

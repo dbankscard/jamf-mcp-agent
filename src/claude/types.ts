@@ -34,3 +34,31 @@ export interface AgentResult {
   toolCallCount: number;
   rounds: number;
 }
+
+export interface RemediationAction {
+  findingIndex: number;
+  findingTitle: string;
+  action: string;
+  toolsUsed: string[];
+  status: 'success' | 'partial' | 'failed' | 'skipped';
+  devicesRemediated: number;
+  details: string;
+  error?: string;
+}
+
+export interface RemediationReport {
+  summary: string;
+  originalReportStatus: 'healthy' | 'warning' | 'critical';
+  findingsAttempted: number;
+  findingsSucceeded: number;
+  findingsFailed: number;
+  actions: RemediationAction[];
+  dryRun: boolean;
+}
+
+export interface RemediationResult {
+  report: RemediationReport | null;
+  rawText: string;
+  toolCallCount: number;
+  rounds: number;
+}

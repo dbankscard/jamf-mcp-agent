@@ -34,6 +34,7 @@ import {
   recordAgentRun,
   recordSchedulerJob,
   recordSlackPost,
+  recordRemediation,
 } from './metrics.js';
 
 describe('metrics', () => {
@@ -124,6 +125,29 @@ describe('metrics', () => {
       await recordSlackPost(100, false);
 
       expect(mockPutMetric).not.toHaveBeenCalledWith('slack.post.errors', expect.anything(), expect.anything());
+    });
+  });
+
+  describe('recordRemediation', () => {
+    it('records duration, findings attempted, and findings succeeded', async () => {
+      await recordRemediation(3000, 5, 4, false);
+
+      expect(mockPutMetric).toHaveBeenCalledWith('remediation.duration', 3000, 'Milliseconds');
+      expect(mockPutMetric).toHaveBeenCalledWith('remediation.findings_attempted', 5, 'Count');
+      expect(mockPutMetric).toHaveBeenCalledWith('remediation.findings_succeeded', 4, 'Count');
+      expect(mockFlush).toHaveBeenCalled();
+    });
+
+    it('records dry_run metric when dryRun is true', async () => {
+      await recordRemediation(1000, 2, 0, true);
+
+      expect(mockPutMetric).toHaveBeenCalledWith('remediation.dry_run', 1, 'Count');
+    });
+
+    it('does not record dry_run metric when dryRun is false', async () => {
+      await recordRemediation(1000, 2, 2, false);
+
+      expect(mockPutMetric).not.toHaveBeenCalledWith('remediation.dry_run', expect.anything(), expect.anything());
     });
   });
 

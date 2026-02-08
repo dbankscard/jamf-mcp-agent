@@ -24,7 +24,7 @@ vi.mock('../logger.js', () => ({
 import { SlackClient } from './client.js';
 import { SlackError } from '../errors.js';
 import { logger } from '../logger.js';
-import type { AgentReport } from '../claude/types.js';
+import type { AgentReport, RemediationReport } from '../claude/types.js';
 
 function makeReport(overrides?: Partial<AgentReport>): AgentReport {
   return {
@@ -274,6 +274,138 @@ describe('SlackClient', () => {
       expect(slackErr.cause).toBeInstanceOf(Error);
       expect((slackErr.cause as Error).message).toBe('channel_not_found');
     }
+  });
+
+  describe('postRemediationReport', () => {
+    function makeRemediationReport(overrides?: Partial<RemediationReport>): RemediationReport {
+      return {
+        summary: 'Remediated 1 finding.',
+        originalReportStatus: 'warning',
+        findingsAttempted: 1,
+        findingsSucceeded: 1,
+        findingsFailed: 0,
+        actions: [],
+        dryRun: false,
+        ...overrides,
+      };
+    }
+
+    it('posts remediation header to channel', async () => {
+      const client = new SlackClient('xoxb-test');
+      await client.postRemediationReport('C123', makeRemediationReport());
+
+      expect(mockPostMessage).toHaveBeenCalledTimes(1);
+      expect(mockPostMessage.mock.calls[0][0].channel).toBe('C123');
+    });
+
+    it('threads each action as a reply', async () => {
+      const report = makeRemediationReport({
+        actions: [
+          {
+            findingIndex: 0,
+            findingTitle: 'Outdated OS',
+            action: 'Updated OS',
+            toolsUsed: ['createSoftwareUpdatePlan'],
+            status: 'success',
+            devicesRemediated: 5,
+            details: 'Done',
+          },
+          {
+            findingIndex: 1,
+            findingTitle: 'Missing Encryption',
+            action: 'Deployed profile',
+            toolsUsed: ['deployConfigurationProfile'],
+            status: 'success',
+            devicesRemediated: 3,
+            details: 'Done',
+          },
+        ],
+      });
+
+      const client = new SlackClient('xoxb-test');
+      await client.postRemediationReport('C123', report);
+
+      // Header + 2 action threads = 3 calls
+      expect(mockPostMessage).toHaveBeenCalledTimes(3);
+      expect(mockPostMessage.mock.calls[1][0].thread_ts).toBe('123.456');
+      expect(mockPostMessage.mock.calls[2][0].thread_ts).toBe('123.456');
+    });
+
+    it('handles missing thread_ts gracefully', async () => {
+      mockPostMessage.mockResolvedValueOnce({ ok: true, ts: undefined });
+
+      const report = makeRemediationReport({
+        actions: [
+          {
+            findingIndex: 0,
+            findingTitle: 'Issue',
+            action: 'Fixed',
+            toolsUsed: [],
+            status: 'success',
+            devicesRemediated: 1,
+            details: 'Done',
+          },
+        ],
+      });
+
+      const client = new SlackClient('xoxb-test');
+      await client.postRemediationReport('C123', report);
+
+      // Only header posted, no thread replies
+      expect(mockPostMessage).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws SlackError on header post failure', async () => {
+      mockPostMessage.mockRejectedValue(new Error('channel_not_found'));
+
+      const client = new SlackClient('xoxb-test');
+
+      await expect(
+        client.postRemediationReport('C999', makeRemediationReport()),
+      ).rejects.toThrow(SlackError);
+    });
+
+    it('action thread failure logs warning and does not throw', async () => {
+      const report = makeRemediationReport({
+        actions: [
+          {
+            findingIndex: 0,
+            findingTitle: 'Test Action',
+            action: 'Fix',
+            toolsUsed: [],
+            status: 'success',
+            devicesRemediated: 1,
+            details: 'Done',
+          },
+        ],
+      });
+
+      mockPostMessage
+        .mockResolvedValueOnce({ ok: true, ts: '123.456' })
+        .mockRejectedValueOnce(new Error('rate_limited'));
+
+      const client = new SlackClient('xoxb-test');
+      await client.postRemediationReport('C123', report);
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to post remediation action thread: Test Action'),
+        expect.objectContaining({ error: 'rate_limited' }),
+      );
+    });
+
+    it('uses "Dry Run" text for dry-run reports', async () => {
+      const client = new SlackClient('xoxb-test');
+      await client.postRemediationReport('C123', makeRemediationReport({ dryRun: true }));
+
+      expect(mockPostMessage.mock.calls[0][0].text).toContain('Dry Run');
+    });
+
+    it('uses "Remediation" text for live reports', async () => {
+      const client = new SlackClient('xoxb-test');
+      await client.postRemediationReport('C123', makeRemediationReport({ dryRun: false }));
+
+      expect(mockPostMessage.mock.calls[0][0].text).toContain('Remediation');
+    });
   });
 
   it('finding thread failure with non-Error value logs stringified warning', async () => {
