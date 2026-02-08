@@ -38,7 +38,10 @@ export class ShutdownManager {
     if (this.installed) return;
     this.installed = true;
 
-    const handler = () => void this.shutdown();
+    const handler = (signal: string) => {
+      logger.info(`Received ${signal}, shutting down...`);
+      void this.shutdown();
+    };
     process.on('SIGINT', handler);
     process.on('SIGTERM', handler);
   }

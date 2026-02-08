@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mockPostMessage = vi.fn();
+const mockAuthTest = vi.fn();
 
 vi.mock('@slack/web-api', () => ({
   WebClient: class {
     chat = { postMessage: mockPostMessage };
+    auth = { test: mockAuthTest };
   },
 }));
 
@@ -40,6 +42,7 @@ describe('SlackClient', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockPostMessage.mockResolvedValue({ ok: true, ts: '123.456' });
+    mockAuthTest.mockResolvedValue({ ok: true });
   });
 
   it('posts report header to channel', async () => {
@@ -437,6 +440,29 @@ describe('SlackClient', () => {
       'Failed to post additional findings summary',
       expect.objectContaining({ error: 'rate_limited' }),
     );
+  });
+
+  describe('testAuth', () => {
+    it('resolves when auth.test succeeds', async () => {
+      const client = new SlackClient('xoxb-test');
+      await expect(client.testAuth()).resolves.toBeUndefined();
+      expect(mockAuthTest).toHaveBeenCalledTimes(1);
+    });
+
+    it('throws SlackError when auth.test fails', async () => {
+      mockAuthTest.mockRejectedValue(new Error('invalid_auth'));
+      const client = new SlackClient('xoxb-test');
+
+      await expect(client.testAuth()).rejects.toThrow(SlackError);
+      try {
+        await client.testAuth();
+      } catch (err) {
+        expect(err).toBeInstanceOf(SlackError);
+        const slackErr = err as InstanceType<typeof SlackError>;
+        expect(slackErr.operation).toBe('testAuth');
+        expect((slackErr.cause as Error).message).toBe('invalid_auth');
+      }
+    });
   });
 
   it('finding thread failure with non-Error value logs stringified warning', async () => {

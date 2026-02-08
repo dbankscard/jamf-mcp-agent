@@ -89,6 +89,39 @@ describe('loadConfig', () => {
 
     expect(config.scheduler.maxRetries).toBe(2);
     expect(config.scheduler.retryBackoffMs).toBe(30_000);
+    expect(config.scheduler.jobTimeoutMs).toBe(600_000);
+  });
+
+  it('applies healthPort default', async () => {
+    process.env.MCP_TRANSPORT = 'http';
+    process.env.MCP_SERVER_URL = 'http://localhost:3001/mcp';
+
+    const { loadConfig } = await import('./config.js');
+    const config = await loadConfig();
+
+    expect(config.healthPort).toBe(8080);
+  });
+
+  it('reads HEALTH_PORT from env', async () => {
+    process.env.MCP_TRANSPORT = 'http';
+    process.env.MCP_SERVER_URL = 'http://localhost:3001/mcp';
+    process.env.HEALTH_PORT = '9090';
+
+    const { loadConfig } = await import('./config.js');
+    const config = await loadConfig();
+
+    expect(config.healthPort).toBe(9090);
+  });
+
+  it('reads JOB_TIMEOUT_MS from env', async () => {
+    process.env.MCP_TRANSPORT = 'http';
+    process.env.MCP_SERVER_URL = 'http://localhost:3001/mcp';
+    process.env.JOB_TIMEOUT_MS = '300000';
+
+    const { loadConfig } = await import('./config.js');
+    const config = await loadConfig();
+
+    expect(config.scheduler.jobTimeoutMs).toBe(300_000);
   });
 
   it('reads BEDROCK_MAX_TOKENS from env', async () => {

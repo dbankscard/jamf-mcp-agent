@@ -11,6 +11,8 @@ import { startScheduler } from '../scheduler/index.js';
 import { logger } from '../logger.js';
 import { shutdownManager } from '../shutdown.js';
 import { HealthChecker } from '../health.js';
+import { createHealthServer } from '../health-server.js';
+import { preflight, logStartupBanner, loadConfigWithRetry } from '../preflight.js';
 import { recordRemediation } from '../metrics.js';
 import type { AgentReport, Finding } from '../claude/types.js';
 import * as fs from 'node:fs';
@@ -71,7 +73,11 @@ program
   .command('start')
   .description('Start in daemon mode with scheduled reports')
   .action(async () => {
-    const { agent, slack, mcp, config } = await boot();
+    const config = await loadConfigWithRetry();
+    const { agent, slack, mcp } = await boot({ config });
+
+    await preflight({ mcp, slack, config });
+    logStartupBanner(config);
 
     shutdownManager.onShutdown(() => mcp.disconnect());
     startScheduler({ agent, slack, config, mcp });
@@ -79,6 +85,11 @@ program
     const checker = new HealthChecker(mcp, config);
     const stopHealthCheck = checker.startPeriodicCheck(60_000);
     shutdownManager.onShutdown(async () => stopHealthCheck());
+
+    const server = createHealthServer(checker, config.healthPort);
+    shutdownManager.onShutdown(async () => {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    });
 
     shutdownManager.install();
     logger.info('Agent running in daemon mode. Press Ctrl+C to stop.');
@@ -108,10 +119,11 @@ program
 
 interface BootOptions {
   readOnlyTools?: boolean;
+  config?: Config;
 }
 
 async function boot(options?: BootOptions): Promise<{ agent: Agent; slack: SlackClient | null; mcp: MCPClient; config: Config }> {
-  const config = await loadConfig();
+  const config = options?.config ?? await loadConfig();
 
   const mcp = new MCPClient(buildMCPOptions(config));
 

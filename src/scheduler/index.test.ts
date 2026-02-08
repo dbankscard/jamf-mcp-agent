@@ -23,6 +23,7 @@ vi.mock('../shutdown.js', () => ({
 }));
 
 import { runJob, startScheduler, getRunningJobs } from './index.js';
+import { recordSchedulerJob } from '../metrics.js';
 import cron from 'node-cron';
 import type { Config } from '../config.js';
 
@@ -111,6 +112,28 @@ describe('runJob', () => {
     expect(agent.run).toHaveBeenCalledTimes(1);
   });
 
+  it('emits skipped metric when job is already running', async () => {
+    const agent = makeAgent();
+
+    // Simulate slow job
+    agent.run.mockImplementation(
+      () => new Promise(resolve => setTimeout(() => resolve({
+        report: { summary: 't', overallStatus: 'healthy', findings: [], metrics: {} },
+        rawText: '{}',
+        toolCallCount: 0,
+        rounds: 1,
+      }), 200)),
+    );
+
+    const job1 = runJob('compliance', agent, null, undefined, undefined, testConfig);
+    await new Promise(r => setTimeout(r, 50));
+
+    await runJob('compliance', agent, null, undefined, undefined, testConfig);
+    await job1;
+
+    expect(recordSchedulerJob).toHaveBeenCalledWith('compliance', 0, 'skipped');
+  });
+
   it('releases lock after job completes', async () => {
     const agent = makeAgent();
     await runJob('security', agent, null, undefined, undefined, testConfig);
@@ -194,6 +217,66 @@ describe('runJob', () => {
     // 1 initial + 1 retry = 2 attempts
     expect(agent.run).toHaveBeenCalledTimes(2);
     expect(slack.postError).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('runJob — timeout', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('job timeout triggers failure and releases lock', async () => {
+    const timeoutConfig = {
+      ...testConfig,
+      scheduler: { ...testConfig.scheduler, maxRetries: 0, jobTimeoutMs: 50 },
+    } as Config;
+
+    const agent = makeAgent();
+    // Simulate a slow agent that exceeds timeout
+    agent.run.mockImplementation(
+      () => new Promise(resolve => setTimeout(() => resolve({
+        report: { summary: 't', overallStatus: 'healthy', findings: [], metrics: {} },
+        rawText: '{}',
+        toolCallCount: 0,
+        rounds: 1,
+      }), 500)),
+    );
+
+    await runJob('compliance', agent, null, undefined, undefined, timeoutConfig);
+
+    // Job should have failed via timeout, lock released
+    expect(getRunningJobs()).not.toContain('compliance');
+    expect(recordSchedulerJob).toHaveBeenCalledWith('compliance', expect.any(Number), 'error');
+  });
+
+  it('retries after timeout failure', async () => {
+    const timeoutConfig = {
+      ...testConfig,
+      scheduler: { ...testConfig.scheduler, maxRetries: 1, retryBackoffMs: 10, jobTimeoutMs: 50 },
+    } as Config;
+
+    const agent = makeAgent();
+    // First call times out, second succeeds quickly
+    agent.run
+      .mockImplementationOnce(
+        () => new Promise(resolve => setTimeout(() => resolve({
+          report: { summary: 't', overallStatus: 'healthy', findings: [], metrics: {} },
+          rawText: '{}',
+          toolCallCount: 0,
+          rounds: 1,
+        }), 500)),
+      )
+      .mockResolvedValueOnce({
+        report: { summary: 'ok', overallStatus: 'healthy', findings: [], metrics: {} },
+        rawText: '{}',
+        toolCallCount: 1,
+        rounds: 1,
+      });
+
+    await runJob('compliance', agent, null, undefined, undefined, timeoutConfig);
+
+    expect(agent.run).toHaveBeenCalledTimes(2);
+    expect(recordSchedulerJob).toHaveBeenCalledWith('compliance', expect.any(Number), 'success');
   });
 });
 

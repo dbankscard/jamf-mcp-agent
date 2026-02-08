@@ -59,7 +59,7 @@ export async function recordAgentRun(
 export async function recordSchedulerJob(
   jobType: string,
   durationMs: number,
-  status: 'success' | 'error',
+  status: 'success' | 'error' | 'skipped',
 ): Promise<void> {
   await withMetrics(m => {
     m.setDimensions({ jobType });

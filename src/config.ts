@@ -29,6 +29,7 @@ const mcpSchema = z.object({
 });
 
 const configSchema = z.object({
+  healthPort: z.number().int().positive().default(8080),
   mcp: mcpSchema,
   bedrock: z.object({
     region: z.string().default('us-east-1'),
@@ -58,6 +59,7 @@ const configSchema = z.object({
     }),
     maxRetries: z.number().int().nonnegative().default(2),
     retryBackoffMs: z.number().int().positive().default(30_000),
+    jobTimeoutMs: z.number().int().positive().default(600_000),
   }),
 });
 
@@ -65,6 +67,7 @@ export type Config = z.infer<typeof configSchema>;
 
 function buildEnvMap(env: Record<string, string | undefined>): Record<string, unknown> {
   return {
+    healthPort: env.HEALTH_PORT ? Number(env.HEALTH_PORT) : undefined,
     mcp: {
       transport: env.MCP_TRANSPORT ?? undefined,
       serverPath: env.MCP_SERVER_PATH || undefined,
@@ -105,6 +108,7 @@ function buildEnvMap(env: Record<string, string | undefined>): Record<string, un
       },
       maxRetries: env.SCHEDULER_MAX_RETRIES ? Number(env.SCHEDULER_MAX_RETRIES) : undefined,
       retryBackoffMs: env.SCHEDULER_RETRY_BACKOFF_MS ? Number(env.SCHEDULER_RETRY_BACKOFF_MS) : undefined,
+      jobTimeoutMs: env.JOB_TIMEOUT_MS ? Number(env.JOB_TIMEOUT_MS) : undefined,
     },
   };
 }

@@ -14,6 +14,10 @@ const mockInstall = vi.fn();
 const mockGetHealthStatus = vi.fn();
 const mockPostRemediationReport = vi.fn();
 const mockRecordRemediation = vi.fn();
+const mockPreflight = vi.fn();
+const mockLogStartupBanner = vi.fn();
+const mockLoadConfigWithRetry = vi.fn();
+const mockCreateHealthServer = vi.fn();
 
 // ── Track Commander action handlers ────────────────────────────────────
 
@@ -105,6 +109,16 @@ vi.mock('../health.js', () => ({
   },
 }));
 
+vi.mock('../health-server.js', () => ({
+  createHealthServer: (...args: any[]) => mockCreateHealthServer(...args),
+}));
+
+vi.mock('../preflight.js', () => ({
+  preflight: (...args: any[]) => mockPreflight(...args),
+  logStartupBanner: (...args: any[]) => mockLogStartupBanner(...args),
+  loadConfigWithRetry: (...args: any[]) => mockLoadConfigWithRetry(...args),
+}));
+
 vi.mock('../metrics.js', () => ({
   recordRemediation: (...args: any[]) => mockRecordRemediation(...args),
 }));
@@ -130,6 +144,7 @@ vi.mock('../logger.js', () => ({
 
 function makeConfig(overrides?: Record<string, any>) {
   return {
+    healthPort: 8080,
     mcp: {
       transport: 'http',
       serverUrl: 'http://localhost:3001/mcp',
@@ -161,6 +176,7 @@ function makeConfig(overrides?: Record<string, any>) {
         security: '0 9 * * 1-5',
         fleet: '0 10 * * 1',
       },
+      jobTimeoutMs: 600000,
     },
     ...overrides,
   };
@@ -1085,23 +1101,53 @@ describe('remediate command', () => {
 });
 
 describe('start command', () => {
-  it('registers shutdown handler and starts scheduler', async () => {
+  beforeEach(() => {
+    mockPreflight.mockResolvedValue(undefined);
+    mockCreateHealthServer.mockReturnValue({ close: vi.fn((cb: () => void) => cb()) });
+  });
+
+  it('calls loadConfigWithRetry, preflight, and logStartupBanner', async () => {
     const config = makeConfig();
-    mockLoadConfig.mockResolvedValue(config);
+    mockLoadConfigWithRetry.mockResolvedValue(config);
     mockMCPConnect.mockResolvedValue(undefined);
 
     await capturedActions.start();
 
-    expect(mockOnShutdown).toHaveBeenCalledTimes(2); // MCP disconnect + health check stop
+    expect(mockLoadConfigWithRetry).toHaveBeenCalledTimes(1);
+    expect(mockPreflight).toHaveBeenCalledTimes(1);
+    expect(mockLogStartupBanner).toHaveBeenCalledWith(config);
+  });
+
+  it('registers shutdown handlers for MCP, health check, and health server', async () => {
+    const config = makeConfig();
+    mockLoadConfigWithRetry.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+
+    await capturedActions.start();
+
+    // MCP disconnect + health check stop + health server close
+    expect(mockOnShutdown).toHaveBeenCalledTimes(3);
     expect(typeof mockOnShutdown.mock.calls[0][0]).toBe('function');
     expect(typeof mockOnShutdown.mock.calls[1][0]).toBe('function');
+    expect(typeof mockOnShutdown.mock.calls[2][0]).toBe('function');
     expect(mockStartScheduler).toHaveBeenCalledTimes(1);
     expect(mockInstall).toHaveBeenCalledTimes(1);
   });
 
+  it('creates health server on config.healthPort', async () => {
+    const config = makeConfig();
+    mockLoadConfigWithRetry.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+
+    await capturedActions.start();
+
+    expect(mockCreateHealthServer).toHaveBeenCalledTimes(1);
+    expect(mockCreateHealthServer.mock.calls[0][1]).toBe(8080);
+  });
+
   it('passes agent, slack, and config to startScheduler', async () => {
     const config = makeSlackEnabledConfig();
-    mockLoadConfig.mockResolvedValue(config);
+    mockLoadConfigWithRetry.mockResolvedValue(config);
     mockMCPConnect.mockResolvedValue(undefined);
 
     await capturedActions.start();
@@ -1115,7 +1161,7 @@ describe('start command', () => {
 
   it('passes null slack to startScheduler when slack disabled', async () => {
     const config = makeConfig();
-    mockLoadConfig.mockResolvedValue(config);
+    mockLoadConfigWithRetry.mockResolvedValue(config);
     mockMCPConnect.mockResolvedValue(undefined);
 
     await capturedActions.start();
@@ -1126,7 +1172,7 @@ describe('start command', () => {
 
   it('shutdown callback disconnects MCP', async () => {
     const config = makeConfig();
-    mockLoadConfig.mockResolvedValue(config);
+    mockLoadConfigWithRetry.mockResolvedValue(config);
     mockMCPConnect.mockResolvedValue(undefined);
     mockMCPDisconnect.mockResolvedValue(undefined);
 

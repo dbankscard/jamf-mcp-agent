@@ -12,6 +12,17 @@ export class SlackClient {
     this.web = new WebClient(botToken);
   }
 
+  async testAuth(): Promise<void> {
+    try {
+      await this.web.auth.test();
+    } catch (err) {
+      throw new SlackError('Slack auth test failed', {
+        operation: 'testAuth',
+        cause: err instanceof Error ? err : new Error(String(err)),
+      });
+    }
+  }
+
   /**
    * Post a full report: summary header in the channel, then each
    * critical/high finding as a threaded reply.

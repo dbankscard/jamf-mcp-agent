@@ -20,7 +20,7 @@ async function main(): Promise<void> {
   // Register MCP cleanup
   shutdownManager.onShutdown(() => mcp.disconnect());
 
-  // 2. Init Bedrock agent
+  // 2. Init Bedrock agent (read-only — use CLI for full control)
   const agent = new Agent(mcp, {
     model: config.bedrock.model,
     maxToolRounds: config.bedrock.maxToolRounds,
@@ -29,6 +29,7 @@ async function main(): Promise<void> {
     accessKeyId: config.bedrock.accessKeyId,
     secretAccessKey: config.bedrock.secretAccessKey,
     requestTimeoutMs: config.bedrock.requestTimeoutMs,
+    readOnlyTools: true,
   });
 
   // 3. Init Slack client (optional)

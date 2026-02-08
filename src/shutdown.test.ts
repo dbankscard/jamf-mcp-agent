@@ -1,11 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ShutdownManager } from './shutdown.js';
 
+const mockLogger = vi.fn();
+vi.mock('./logger.js', () => ({
+  logger: {
+    debug: (...args: any[]) => mockLogger('debug', ...args),
+    info: (...args: any[]) => mockLogger('info', ...args),
+    warn: (...args: any[]) => mockLogger('warn', ...args),
+    error: (...args: any[]) => mockLogger('error', ...args),
+  },
+}));
+
 describe('ShutdownManager', () => {
   let manager: ShutdownManager;
 
   beforeEach(() => {
     manager = new ShutdownManager();
+    mockLogger.mockClear();
   });
 
   it('starts with no in-flight operations', () => {
@@ -78,6 +89,25 @@ describe('ShutdownManager', () => {
 
     expect(order).toEqual(['released', 'cleanup']);
     mockExit.mockRestore();
+  });
+
+  it('logs signal name when install handler is triggered', () => {
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
+    const mockOn = vi.spyOn(process, 'on');
+
+    manager.install();
+
+    // Find the SIGTERM handler
+    const sigTermCall = mockOn.mock.calls.find(c => c[0] === 'SIGTERM');
+    expect(sigTermCall).toBeDefined();
+
+    const handler = sigTermCall![1] as (signal: string) => void;
+    handler('SIGTERM');
+
+    expect(mockLogger).toHaveBeenCalledWith('info', 'Received SIGTERM, shutting down...');
+
+    mockExit.mockRestore();
+    mockOn.mockRestore();
   });
 
   it('only shuts down once', async () => {

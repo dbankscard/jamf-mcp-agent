@@ -8,6 +8,7 @@ import { logger } from '../logger.js';
 import { recordSchedulerJob } from '../metrics.js';
 import { runWithContext } from '../context.js';
 import { shutdownManager } from '../shutdown.js';
+import { withTimeout } from '../utils.js';
 import cron from 'node-cron';
 
 export interface SchedulerDeps {
@@ -77,11 +78,13 @@ export async function runJob(
 ): Promise<void> {
   if (runningJobs.get(type)) {
     logger.warn(`Skipping ${type} job — previous run still in progress`);
+    recordSchedulerJob(type, 0, 'skipped').catch(() => {});
     return;
   }
 
   const maxRetries = config?.scheduler.maxRetries ?? 2;
   const retryBackoffMs = config?.scheduler.retryBackoffMs ?? 30_000;
+  const jobTimeoutMs = config?.scheduler.jobTimeoutMs ?? 600_000;
 
   return runWithContext(async () => {
     runningJobs.set(type, true);
@@ -110,7 +113,12 @@ export async function runJob(
             }
           }
 
-          const result = await agent.run(getSystemPrompt(type), userMessage);
+          const result = await withTimeout(
+            agent.run(getSystemPrompt(type), userMessage),
+            jobTimeoutMs,
+            `${type}-job`,
+            'scheduler',
+          );
 
           if (result.report) {
             logger.info(`${type} report: status=${result.report.overallStatus}, findings=${result.report.findings.length}`);
