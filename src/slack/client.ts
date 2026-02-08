@@ -73,11 +73,17 @@ export class SlackClient {
         .map(f => `• *[${f.severity}]* ${f.title} — ${f.affectedDeviceCount} device(s)`)
         .join('\n');
 
-      await this.web.chat.postMessage({
-        channel: channelId,
-        thread_ts: threadTs,
-        text: `*Additional findings (${otherFindings.length}):*\n${summaryLines}`,
-      });
+      try {
+        await this.web.chat.postMessage({
+          channel: channelId,
+          thread_ts: threadTs,
+          text: `*Additional findings (${otherFindings.length}):*\n${summaryLines}`,
+        });
+      } catch (err) {
+        logger.warn('Failed to post additional findings summary', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     logger.info(`Posted report to Slack channel ${channelId}`);

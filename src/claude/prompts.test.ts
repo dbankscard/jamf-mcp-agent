@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getSystemPrompt, getUserMessage, type ReportType, getRemediationPrompt, buildRemediationUserMessage, WRITE_TOOLS_BY_CATEGORY } from './prompts.js';
+import { getSystemPrompt, getUserMessage, type ReportType, getRemediationPrompt, buildRemediationUserMessage, WRITE_TOOLS_BY_CATEGORY, PROMPT_VERSION, getResourceUris, buildResourceContext } from './prompts.js';
 import type { Finding } from './types.js';
 
 describe('prompts', () => {
@@ -139,7 +139,7 @@ describe('prompts', () => {
 
   describe('ReportType type', () => {
     it('all valid report types are supported', () => {
-      const types: ReportType[] = ['compliance', 'security', 'fleet', 'adhoc'];
+      const types: ReportType[] = ['compliance', 'security', 'fleet', 'adhoc', 'adhoc-write'];
       types.forEach((type) => {
         const systemPrompt = getSystemPrompt(type);
         const userMessage = getUserMessage(type);
@@ -160,6 +160,7 @@ describe('WRITE_TOOLS_BY_CATEGORY', () => {
     expect(categories).toContain('Scripts');
     expect(categories).toContain('Groups & Searches');
     expect(categories).toContain('Inventory & Attributes');
+    expect(categories).toContain('Compound Skills');
   });
 
   it('has no empty categories', () => {
@@ -168,9 +169,9 @@ describe('WRITE_TOOLS_BY_CATEGORY', () => {
     }
   });
 
-  it('contains all 25 write tools', () => {
+  it('contains all 30 write tools', () => {
     const allTools = Object.values(WRITE_TOOLS_BY_CATEGORY).flat();
-    expect(allTools).toHaveLength(25);
+    expect(allTools).toHaveLength(30);
   });
 
   const expectedTools = [
@@ -199,6 +200,11 @@ describe('WRITE_TOOLS_BY_CATEGORY', () => {
     'updateMobileDeviceInventory',
     'createComputerExtensionAttribute',
     'updateComputerExtensionAttribute',
+    'skill_batch_inventory_update',
+    'skill_deploy_policy_by_criteria',
+    'skill_device_search',
+    'skill_find_outdated_devices',
+    'skill_scheduled_compliance_check',
   ];
 
   it.each(expectedTools)('includes write tool: %s', (tool) => {
@@ -266,6 +272,27 @@ describe('getRemediationPrompt', () => {
       expect(prompt).toContain(category);
     }
   });
+
+  it('live prompt includes specificity requirements', () => {
+    const prompt = getRemediationPrompt(false);
+    expect(prompt).toContain('Specificity requirements');
+    expect(prompt).toContain('by name and ID');
+    expect(prompt).toContain('device names');
+    expect(prompt).toContain('tool parameters');
+  });
+
+  it('dry-run prompt includes specificity requirements with exact-parameters rule', () => {
+    const prompt = getRemediationPrompt(true);
+    expect(prompt).toContain('Specificity requirements');
+    expect(prompt).toContain('by name and ID');
+    expect(prompt).toContain('exact parameters');
+  });
+
+  it('schema instruction includes originalReportStatus rule', () => {
+    const prompt = getRemediationPrompt(false);
+    expect(prompt).toContain('Set originalReportStatus to the overallStatus value provided in the input');
+    expect(prompt).toContain('do not infer it from finding severities');
+  });
 });
 
 describe('buildRemediationUserMessage', () => {
@@ -312,5 +339,94 @@ describe('buildRemediationUserMessage', () => {
     const findings = [makeFinding()];
     const message = buildRemediationUserMessage(findings, [99]);
     expect(message).toContain('0 finding(s)');
+  });
+
+  it('includes overallStatus when provided', () => {
+    const findings = [makeFinding({ title: 'Test Finding' })];
+    const message = buildRemediationUserMessage(findings, [0], 'warning');
+    expect(message).toContain('The original report had overallStatus: "warning".');
+    expect(message).toContain('Test Finding');
+  });
+
+  it('omits overallStatus line when not provided', () => {
+    const findings = [makeFinding({ title: 'Test Finding' })];
+    const message = buildRemediationUserMessage(findings, [0]);
+    expect(message).not.toContain('overallStatus');
+    expect(message).toContain('Test Finding');
+  });
+});
+
+describe('adhoc-write prompt', () => {
+  it('includes safety rules', () => {
+    const prompt = getSystemPrompt('adhoc-write');
+    expect(prompt).toContain('SAFETY RULES');
+    expect(prompt).toContain('confirm: true');
+  });
+
+  it('includes write tools by category', () => {
+    const prompt = getSystemPrompt('adhoc-write');
+    expect(prompt).toContain('Policy Management');
+    expect(prompt).toContain('executePolicy');
+  });
+
+  it('includes write access description', () => {
+    const prompt = getSystemPrompt('adhoc-write');
+    expect(prompt).toContain('write access');
+  });
+});
+
+describe('PROMPT_VERSION', () => {
+  it('is a semver string', () => {
+    expect(PROMPT_VERSION).toMatch(/^\d+\.\d+\.\d+$/);
+  });
+});
+
+describe('resource-aware prompts', () => {
+  it('report prompts mention pre-fetched resource data', () => {
+    for (const type of ['compliance', 'security', 'fleet'] as ReportType[]) {
+      const prompt = getSystemPrompt(type);
+      expect(prompt).toContain('Pre-fetched resource data');
+    }
+  });
+});
+
+describe('getResourceUris', () => {
+  it('returns URIs for compliance', () => {
+    const uris = getResourceUris('compliance');
+    expect(uris.length).toBeGreaterThan(0);
+    expect(uris).toContain('jamf://reports/compliance');
+  });
+
+  it('returns URIs for security', () => {
+    const uris = getResourceUris('security');
+    expect(uris.length).toBeGreaterThan(0);
+    expect(uris).toContain('jamf://reports/encryption-status');
+  });
+
+  it('returns URIs for fleet', () => {
+    const uris = getResourceUris('fleet');
+    expect(uris.length).toBeGreaterThan(0);
+    expect(uris).toContain('jamf://inventory/computers');
+  });
+
+  it('returns empty array for adhoc', () => {
+    expect(getResourceUris('adhoc')).toEqual([]);
+  });
+});
+
+describe('buildResourceContext', () => {
+  it('returns empty string when no resources', () => {
+    expect(buildResourceContext({})).toBe('');
+  });
+
+  it('formats resource data with URIs', () => {
+    const result = buildResourceContext({
+      'jamf://reports/compliance': '{"total": 10}',
+      'jamf://reports/encryption-status': '{"encrypted": 8}',
+    });
+    expect(result).toContain('--- jamf://reports/compliance ---');
+    expect(result).toContain('{"total": 10}');
+    expect(result).toContain('--- jamf://reports/encryption-status ---');
+    expect(result).toContain('{"encrypted": 8}');
   });
 });

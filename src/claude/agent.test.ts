@@ -60,6 +60,57 @@ describe('Agent', () => {
     expect(result.report?.overallStatus).toBe('healthy');
     expect(result.rounds).toBe(1);
     expect(result.toolCallCount).toBe(0);
+    expect(result.tokenUsage).toEqual({ inputTokens: 0, outputTokens: 0, totalTokens: 0 });
+  });
+
+  it('accumulates token usage across rounds', async () => {
+    mockSend
+      .mockResolvedValueOnce({
+        output: {
+          message: {
+            content: [
+              {
+                toolUse: {
+                  toolUseId: 'tool-1',
+                  name: 'getFleetOverview',
+                  input: {},
+                },
+              },
+            ],
+          },
+        },
+        stopReason: 'tool_use',
+        usage: { inputTokens: 100, outputTokens: 50 },
+      })
+      .mockResolvedValueOnce({
+        output: {
+          message: {
+            content: [{ text: '{"summary":"ok","overallStatus":"healthy","findings":[],"metrics":{}}' }],
+          },
+        },
+        stopReason: 'end_turn',
+        usage: { inputTokens: 200, outputTokens: 80 },
+      });
+
+    const mcp = makeMCPClient();
+    mcp.callTool.mockResolvedValue({
+      content: [{ type: 'text', text: '{"totalDevices": 10}' }],
+      isError: false,
+    });
+
+    const agent = new Agent(mcp, {
+      model: 'test-model',
+      maxToolRounds: 5,
+      region: 'us-east-1',
+    });
+
+    const result = await agent.run('system', 'user');
+
+    expect(result.tokenUsage).toEqual({
+      inputTokens: 300,
+      outputTokens: 130,
+      totalTokens: 430,
+    });
   });
 
   it('handles multi-round with tool calls', async () => {
@@ -543,6 +594,112 @@ describe('Agent', () => {
       const result = await agent.runRemediation('system', 'user');
       expect(result.report?.dryRun).toBe(true);
       expect(result.report?.findingsFailed).toBe(1);
+    });
+
+    it('strips error field from success actions', async () => {
+      const remReport = JSON.stringify({
+        summary: 'Done',
+        originalReportStatus: 'warning',
+        findingsAttempted: 2,
+        findingsSucceeded: 2,
+        findingsFailed: 0,
+        actions: [
+          {
+            findingIndex: 0,
+            findingTitle: 'Issue A',
+            action: 'Fixed',
+            toolsUsed: ['executePolicy'],
+            status: 'success',
+            devicesRemediated: 3,
+            details: 'Fixed all',
+            error: null,
+          },
+          {
+            findingIndex: 1,
+            findingTitle: 'Issue B',
+            action: 'Skipped',
+            toolsUsed: [],
+            status: 'skipped',
+            devicesRemediated: 0,
+            details: 'Not automatable',
+            error: null,
+          },
+        ],
+        dryRun: false,
+      });
+
+      mockSend.mockResolvedValue({
+        output: {
+          message: { content: [{ text: remReport }] },
+        },
+        stopReason: 'end_turn',
+      });
+
+      const mcp = makeMCPClient();
+      const agent = new Agent(mcp, {
+        model: 'test-model',
+        maxToolRounds: 5,
+        region: 'us-east-1',
+      });
+
+      const result = await agent.runRemediation('system', 'user');
+      expect(result.report).not.toBeNull();
+      // error should be stripped from success and skipped
+      expect(result.report!.actions[0]).not.toHaveProperty('error');
+      expect(result.report!.actions[1]).not.toHaveProperty('error');
+    });
+
+    it('preserves error field on failed and partial actions', async () => {
+      const remReport = JSON.stringify({
+        summary: 'Partial',
+        originalReportStatus: 'critical',
+        findingsAttempted: 2,
+        findingsSucceeded: 0,
+        findingsFailed: 2,
+        actions: [
+          {
+            findingIndex: 0,
+            findingTitle: 'Issue A',
+            action: 'Attempted fix',
+            toolsUsed: ['executePolicy'],
+            status: 'failed',
+            devicesRemediated: 0,
+            details: 'Failed',
+            error: 'Policy not found',
+          },
+          {
+            findingIndex: 1,
+            findingTitle: 'Issue B',
+            action: 'Partial fix',
+            toolsUsed: ['sendMDMCommand'],
+            status: 'partial',
+            devicesRemediated: 1,
+            details: 'Partial',
+            error: 'Some devices unreachable',
+          },
+        ],
+        dryRun: false,
+      });
+
+      mockSend.mockResolvedValue({
+        output: {
+          message: { content: [{ text: remReport }] },
+        },
+        stopReason: 'end_turn',
+      });
+
+      const mcp = makeMCPClient();
+      const agent = new Agent(mcp, {
+        model: 'test-model',
+        maxToolRounds: 5,
+        region: 'us-east-1',
+      });
+
+      const result = await agent.runRemediation('system', 'user');
+      expect(result.report).not.toBeNull();
+      // error should be preserved for failed and partial
+      expect(result.report!.actions[0].error).toBe('Policy not found');
+      expect(result.report!.actions[1].error).toBe('Some devices unreachable');
     });
 
     it('preserves rawText and round counts', async () => {

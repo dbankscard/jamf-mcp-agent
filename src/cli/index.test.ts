@@ -101,6 +101,7 @@ vi.mock('../health.js', () => ({
   HealthChecker: class {
     constructor() {}
     getHealthStatus = mockGetHealthStatus;
+    startPeriodicCheck = vi.fn(() => vi.fn());
   },
 }));
 
@@ -549,11 +550,13 @@ describe('remediate command', () => {
   const mockExit = vi.spyOn(process, 'exit').mockImplementation((() => {}) as any);
   const mockConsoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   const mockConsoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+  const mockStderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
 
   beforeEach(() => {
     mockExit.mockClear();
     mockConsoleError.mockClear();
     mockConsoleLog.mockClear();
+    mockStderrWrite.mockClear();
     mockRecordRemediation.mockResolvedValue(undefined);
   });
 
@@ -809,6 +812,276 @@ describe('remediate command', () => {
 
     expect(mockConsoleLog).toHaveBeenCalledWith('plain text result');
   });
+
+  it('prints analysis summary to stderr after Phase 1', async () => {
+    const config = makeConfig();
+    mockLoadConfig.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+
+    const findings = [
+      {
+        title: 'Unencrypted Disks',
+        severity: 'critical',
+        category: 'security',
+        description: 'desc',
+        affectedDeviceCount: 5,
+        affectedDevices: [],
+        remediation: { title: 'Encrypt', steps: [], effort: 'medium', automatable: true },
+      },
+      {
+        title: 'Outdated OS',
+        severity: 'high',
+        category: 'compliance',
+        description: 'desc',
+        affectedDeviceCount: 3,
+        affectedDevices: [],
+        remediation: { title: 'Update', steps: [], effort: 'low', automatable: false },
+      },
+    ];
+
+    mockAgentRun.mockResolvedValue({
+      report: { summary: 'Issues', overallStatus: 'warning', findings, metrics: {} },
+      rawText: '{}',
+      toolCallCount: 2,
+      rounds: 2,
+    });
+
+    const remReport = {
+      summary: 'Fixed 1',
+      originalReportStatus: 'warning',
+      findingsAttempted: 1,
+      findingsSucceeded: 1,
+      findingsFailed: 0,
+      actions: [],
+      dryRun: true,
+    };
+    mockAgentRunRemediation.mockResolvedValue({
+      report: remReport,
+      rawText: JSON.stringify(remReport),
+      toolCallCount: 0,
+      rounds: 1,
+    });
+
+    await capturedActions.remediate('security', { dryRun: true, autoApprove: true });
+
+    const stderrOutput = mockStderrWrite.mock.calls.map(c => c[0]).join('');
+    // Analysis summary
+    expect(stderrOutput).toContain('Analysis: warning');
+    expect(stderrOutput).toContain('2 finding(s)');
+    expect(stderrOutput).toContain('[CRITICAL] Unencrypted Disks');
+    expect(stderrOutput).toContain('[HIGH] Outdated OS');
+  });
+
+  it('prints selection summary with skip reasons to stderr', async () => {
+    const config = makeConfig();
+    mockLoadConfig.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+
+    const findings = [
+      {
+        title: 'Automatable Issue',
+        severity: 'critical',
+        category: 'security',
+        description: 'desc',
+        affectedDeviceCount: 5,
+        affectedDevices: [],
+        remediation: { title: 'Fix', steps: [], effort: 'low', automatable: true },
+      },
+      {
+        title: 'Manual Issue',
+        severity: 'high',
+        category: 'compliance',
+        description: 'desc',
+        affectedDeviceCount: 3,
+        affectedDevices: [],
+        remediation: { title: 'Fix', steps: [], effort: 'high', automatable: false },
+      },
+    ];
+
+    mockAgentRun.mockResolvedValue({
+      report: { summary: 'Issues', overallStatus: 'critical', findings, metrics: {} },
+      rawText: '{}',
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    const remReport = {
+      summary: 'Fixed',
+      originalReportStatus: 'critical',
+      findingsAttempted: 1,
+      findingsSucceeded: 1,
+      findingsFailed: 0,
+      actions: [],
+      dryRun: false,
+    };
+    mockAgentRunRemediation.mockResolvedValue({
+      report: remReport,
+      rawText: JSON.stringify(remReport),
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    await capturedActions.remediate('security', { autoApprove: true });
+
+    const stderrOutput = mockStderrWrite.mock.calls.map(c => c[0]).join('');
+    // Selection summary
+    expect(stderrOutput).toContain('Selected 1 of 2 finding(s) for remediation');
+    expect(stderrOutput).toContain('Automatable Issue');
+    expect(stderrOutput).toContain('selected');
+    expect(stderrOutput).toContain('Manual Issue');
+    expect(stderrOutput).toContain('skipped (manual)');
+  });
+
+  it('passes overallStatus to buildRemediationUserMessage', async () => {
+    const { buildRemediationUserMessage } = await import('../claude/prompts.js');
+    const config = makeConfig();
+    mockLoadConfig.mockResolvedValue(config);
+    mockMCPConnect.mockResolvedValue(undefined);
+
+    const finding = {
+      title: 'Test Issue',
+      severity: 'high',
+      category: 'compliance',
+      description: 'desc',
+      affectedDeviceCount: 1,
+      affectedDevices: [],
+      remediation: { title: 'Fix', steps: [], effort: 'low', automatable: true },
+    };
+
+    mockAgentRun.mockResolvedValue({
+      report: { summary: 'Issues', overallStatus: 'warning', findings: [finding], metrics: {} },
+      rawText: '{}',
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    const remReport = {
+      summary: 'Fixed',
+      originalReportStatus: 'warning',
+      findingsAttempted: 1,
+      findingsSucceeded: 1,
+      findingsFailed: 0,
+      actions: [],
+      dryRun: false,
+    };
+    mockAgentRunRemediation.mockResolvedValue({
+      report: remReport,
+      rawText: JSON.stringify(remReport),
+      toolCallCount: 1,
+      rounds: 1,
+    });
+
+    await capturedActions.remediate('compliance', { autoApprove: true });
+
+    expect(buildRemediationUserMessage).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.any(Array),
+      'warning',
+    );
+  });
+
+  describe('loadReportFromFile validation', () => {
+    it('exits with error when finding is missing title', async () => {
+      const { readFileSync } = await import('node:fs');
+      (readFileSync as any).mockReturnValue(JSON.stringify({
+        summary: 'Test',
+        overallStatus: 'warning',
+        findings: [{ severity: 'high', affectedDeviceCount: 1, affectedDevices: [], remediation: { automatable: true } }],
+        metrics: {},
+      }));
+
+      const config = makeConfig();
+      mockLoadConfig.mockResolvedValue(config);
+      mockMCPConnect.mockResolvedValue(undefined);
+
+      await capturedActions.remediate(undefined, { file: '/tmp/report.json', autoApprove: true });
+
+      expect(mockConsoleError).toHaveBeenCalledWith(expect.stringContaining('missing title'));
+      expect(mockExit).toHaveBeenCalledWith(1);
+    });
+
+    it('exits with error when finding has invalid severity', async () => {
+      const { readFileSync } = await import('node:fs');
+      (readFileSync as any).mockReturnValue(JSON.stringify({
+        summary: 'Test',
+        overallStatus: 'warning',
+        findings: [{ title: 'Bad', severity: 'extreme', affectedDeviceCount: 1, affectedDevices: [], remediation: { automatable: true } }],
+        metrics: {},
+      }));
+
+      const config = makeConfig();
+      mockLoadConfig.mockResolvedValue(config);
+      mockMCPConnect.mockResolvedValue(undefined);
+
+      await capturedActions.remediate(undefined, { file: '/tmp/report.json', autoApprove: true });
+
+      expect(mockConsoleError).toHaveBeenCalledWith(expect.stringContaining('invalid severity'));
+      expect(mockExit).toHaveBeenCalledWith(1);
+    });
+
+    it('exits with error when finding is missing remediation.automatable', async () => {
+      const { readFileSync } = await import('node:fs');
+      (readFileSync as any).mockReturnValue(JSON.stringify({
+        summary: 'Test',
+        overallStatus: 'warning',
+        findings: [{ title: 'Issue', severity: 'high', affectedDeviceCount: 1, affectedDevices: [], remediation: { title: 'Fix' } }],
+        metrics: {},
+      }));
+
+      const config = makeConfig();
+      mockLoadConfig.mockResolvedValue(config);
+      mockMCPConnect.mockResolvedValue(undefined);
+
+      await capturedActions.remediate(undefined, { file: '/tmp/report.json', autoApprove: true });
+
+      expect(mockConsoleError).toHaveBeenCalledWith(expect.stringContaining('remediation.automatable must be a boolean'));
+      expect(mockExit).toHaveBeenCalledWith(1);
+    });
+
+    it('accepts valid findings from file', async () => {
+      const { readFileSync } = await import('node:fs');
+      (readFileSync as any).mockReturnValue(JSON.stringify({
+        summary: 'Issues found',
+        overallStatus: 'warning',
+        findings: [{
+          title: 'Valid Finding',
+          severity: 'high',
+          category: 'security',
+          description: 'desc',
+          affectedDeviceCount: 3,
+          affectedDevices: [{ name: 'mac1', id: '1', detail: 'test' }],
+          remediation: { title: 'Fix', steps: ['step1'], effort: 'low', automatable: true },
+        }],
+        metrics: {},
+      }));
+
+      const config = makeConfig();
+      mockLoadConfig.mockResolvedValue(config);
+      mockMCPConnect.mockResolvedValue(undefined);
+
+      const remReport = {
+        summary: 'Fixed',
+        originalReportStatus: 'warning',
+        findingsAttempted: 1,
+        findingsSucceeded: 1,
+        findingsFailed: 0,
+        actions: [],
+        dryRun: true,
+      };
+      mockAgentRunRemediation.mockResolvedValue({
+        report: remReport,
+        rawText: JSON.stringify(remReport),
+        toolCallCount: 0,
+        rounds: 1,
+      });
+
+      await capturedActions.remediate(undefined, { file: '/tmp/report.json', dryRun: true, autoApprove: true });
+
+      // Should not exit with error — should proceed to remediation
+      expect(mockConsoleError).not.toHaveBeenCalled();
+      expect(mockConsoleLog).toHaveBeenCalledWith(JSON.stringify(remReport, null, 2));
+    });
+  });
 });
 
 describe('start command', () => {
@@ -819,8 +1092,9 @@ describe('start command', () => {
 
     await capturedActions.start();
 
-    expect(mockOnShutdown).toHaveBeenCalledTimes(1);
+    expect(mockOnShutdown).toHaveBeenCalledTimes(2); // MCP disconnect + health check stop
     expect(typeof mockOnShutdown.mock.calls[0][0]).toBe('function');
+    expect(typeof mockOnShutdown.mock.calls[1][0]).toBe('function');
     expect(mockStartScheduler).toHaveBeenCalledTimes(1);
     expect(mockInstall).toHaveBeenCalledTimes(1);
   });

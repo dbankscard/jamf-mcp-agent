@@ -10,7 +10,8 @@ import {
 } from '@aws-sdk/client-bedrock-runtime';
 import { MCPClient } from '../mcp/client.js';
 import { mapTools } from '../mcp/tool-mapper.js';
-import { AgentResult, AgentReport, RemediationResult, RemediationReport } from './types.js';
+import { AgentResult, AgentReport, RemediationResult, RemediationReport, TokenUsage } from './types.js';
+import { PROMPT_VERSION } from './prompts.js';
 import { logger } from '../logger.js';
 import { BedrockError } from '../errors.js';
 import { recordAgentRun } from '../metrics.js';
@@ -24,6 +25,8 @@ export interface AgentOptions {
   secretAccessKey?: string;
   readOnlyTools?: boolean;
   requestTimeoutMs?: number;
+  maxTokens?: number;
+  progressToStderr?: boolean;
 }
 
 const RATE_LIMIT_PATTERN = /too many connections|rate limit|throttl/i;
@@ -40,7 +43,10 @@ export class Agent {
   private mcpClient: MCPClient;
   private options: AgentOptions;
 
+  private progressEnabled: boolean;
+
   constructor(mcpClient: MCPClient, options: AgentOptions) {
+    this.progressEnabled = options.progressToStderr ?? (process.stderr.isTTY ?? false);
     const clientConfig: ConstructorParameters<typeof BedrockRuntimeClient>[0] = {
       region: options.region,
     };
@@ -57,6 +63,14 @@ export class Agent {
     this.options = options;
   }
 
+  private reportProgress(round: number, toolCalls: number, tokenUsage: TokenUsage): void {
+    if (!this.progressEnabled) return;
+    const maxRounds = this.options.maxToolRounds;
+    process.stderr.write(
+      `\r  Round ${round}/${maxRounds} | ${toolCalls} tool call(s) | ${tokenUsage.totalTokens} tokens`,
+    );
+  }
+
   async run(systemPrompt: string, userMessage: string): Promise<AgentResult> {
     return runWithContext(() => this.executeAgentLoop(systemPrompt, userMessage));
   }
@@ -68,6 +82,7 @@ export class Agent {
       rawText: result.rawText,
       toolCallCount: result.toolCallCount,
       rounds: result.rounds,
+      tokenUsage: result.tokenUsage,
     };
   }
 
@@ -82,7 +97,7 @@ export class Agent {
       tools: bedrockTools as Tool[],
     };
 
-    logger.info(`Agent starting — ${bedrockTools.length} tools available`);
+    logger.info(`Agent starting — ${bedrockTools.length} tools available, prompt v${PROMPT_VERSION}`);
 
     const system: SystemContentBlock[] = [{ text: systemPrompt }];
 
@@ -92,10 +107,12 @@ export class Agent {
 
     let rounds = 0;
     let toolCallCount = 0;
+    const tokenUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
     while (rounds < this.options.maxToolRounds) {
       rounds++;
       logger.info(`Round ${rounds}/${this.options.maxToolRounds}`);
+      this.reportProgress(rounds, toolCallCount, tokenUsage);
 
       // Wrap entire round in retry logic — rate-limit errors can surface from
       // the MCP transport layer (async errors from compound tool internals),
@@ -103,23 +120,27 @@ export class Agent {
       const roundResult = await this.executeRoundWithRetry(
         system, messages, toolConfig, () => toolCallCount,
         (n: number) => { toolCallCount = n; },
+        tokenUsage,
       );
 
       if (roundResult.done) {
         if (roundResult.rawText !== undefined) {
-          logger.info(`Agent finished after ${rounds} round(s), ${toolCallCount} tool call(s)`);
-          recordAgentRun(Date.now() - agentStart, toolCallCount, rounds).catch(() => {});
+          if (this.progressEnabled) process.stderr.write('\r\x1b[K');
+          logger.info(`Agent finished after ${rounds} round(s), ${toolCallCount} tool call(s), ${tokenUsage.totalTokens} tokens`);
+          recordAgentRun(Date.now() - agentStart, toolCallCount, rounds, tokenUsage).catch(() => {});
           return {
             report: parseReport(roundResult.rawText),
             rawText: roundResult.rawText,
             toolCallCount,
             rounds,
+            tokenUsage,
           };
         }
       }
     }
 
     // Max rounds reached
+    if (this.progressEnabled) process.stderr.write('\r\x1b[K');
     logger.warn(`Agent hit max rounds (${this.options.maxToolRounds})`);
 
     const lastAssistant = messages
@@ -131,8 +152,8 @@ export class Agent {
       .map(b => b.text)
       .join('\n') ?? '';
 
-    recordAgentRun(Date.now() - agentStart, toolCallCount, rounds).catch(() => {});
-    return { report: parseReport(rawText), rawText, toolCallCount, rounds };
+    recordAgentRun(Date.now() - agentStart, toolCallCount, rounds, tokenUsage).catch(() => {});
+    return { report: parseReport(rawText), rawText, toolCallCount, rounds, tokenUsage };
   }
 
   private async executeRoundWithRetry(
@@ -141,10 +162,11 @@ export class Agent {
     toolConfig: { tools: Tool[] },
     getToolCount: () => number,
     setToolCount: (n: number) => void,
+    tokenUsage: TokenUsage,
   ): Promise<{ done: boolean; rawText?: string }> {
     for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt++) {
       try {
-        return await this.executeRound(system, messages, toolConfig, getToolCount, setToolCount);
+        return await this.executeRound(system, messages, toolConfig, getToolCount, setToolCount, tokenUsage);
       } catch (err: any) {
         if (RATE_LIMIT_PATTERN.test(err.message) && attempt < RETRY_ATTEMPTS) {
           const delay = RETRY_BASE_MS * 2 ** (attempt - 1);
@@ -164,6 +186,7 @@ export class Agent {
     toolConfig: { tools: Tool[] },
     getToolCount: () => number,
     setToolCount: (n: number) => void,
+    tokenUsage: TokenUsage,
   ): Promise<{ done: boolean; rawText?: string }> {
     const timeoutMs = this.options.requestTimeoutMs ?? 120_000;
     const abortController = new AbortController();
@@ -174,7 +197,7 @@ export class Agent {
       system,
       messages,
       toolConfig,
-      inferenceConfig: { maxTokens: 8192 },
+      inferenceConfig: { maxTokens: this.options.maxTokens ?? 8192 },
     });
 
     let response;
@@ -192,6 +215,13 @@ export class Agent {
       throw err;
     } finally {
       clearTimeout(timer);
+    }
+
+    // Accumulate token usage from this round
+    if (response.usage) {
+      tokenUsage.inputTokens += response.usage.inputTokens ?? 0;
+      tokenUsage.outputTokens += response.usage.outputTokens ?? 0;
+      tokenUsage.totalTokens = tokenUsage.inputTokens + tokenUsage.outputTokens;
     }
 
     const assistantContent = response.output?.message?.content ?? [];
@@ -340,6 +370,12 @@ function parseRemediationReport(text: string): RemediationReport | null {
       Array.isArray(parsed.actions) &&
       typeof parsed.findingsAttempted === 'number'
     ) {
+      // Strip spurious error fields from success/skipped actions
+      for (const action of parsed.actions) {
+        if ((action.status === 'success' || action.status === 'skipped') && 'error' in action) {
+          delete action.error;
+        }
+      }
       return parsed as RemediationReport;
     }
     return null;

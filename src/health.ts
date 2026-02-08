@@ -1,6 +1,7 @@
 import { MCPClient } from './mcp/client.js';
 import { Config } from './config.js';
 import { getRunningJobs } from './scheduler/index.js';
+import { logger } from './logger.js';
 
 export type ComponentStatus = 'healthy' | 'degraded' | 'unhealthy';
 
@@ -95,5 +96,28 @@ export class HealthChecker {
       return { status: 'healthy', message: `Running: ${running.join(', ')}` };
     }
     return { status: 'healthy', message: 'Scheduler active, no jobs running' };
+  }
+
+  startPeriodicCheck(intervalMs: number = 60_000): () => void {
+    let lastStatus: ComponentStatus = 'healthy';
+
+    const check = async () => {
+      const status = await this.getHealthStatus();
+      if (status.status !== lastStatus) {
+        if (status.status === 'healthy') {
+          logger.info('Health recovered: all components healthy');
+        } else {
+          const degraded = Object.entries(status.components)
+            .filter(([, c]) => c.status !== 'healthy')
+            .map(([name, c]) => `${name}: ${c.message}`)
+            .join('; ');
+          logger.warn(`Health ${status.status}: ${degraded}`);
+        }
+        lastStatus = status.status;
+      }
+    };
+
+    const timer = setInterval(() => void check(), intervalMs);
+    return () => clearInterval(timer);
   }
 }

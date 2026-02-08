@@ -34,8 +34,9 @@ const configSchema = z.object({
     region: z.string().default('us-east-1'),
     accessKeyId: z.string().optional(),
     secretAccessKey: z.string().optional(),
-    model: z.string().default('us.anthropic.claude-3-5-sonnet-20241022-v2:0'),
+    model: z.string().default('us.anthropic.claude-sonnet-4-5-20250929-v1:0'),
     maxToolRounds: z.number().int().positive().default(15),
+    maxTokens: z.number().int().positive().default(8192),
     requestTimeoutMs: z.number().int().positive().default(120_000),
   }),
   slack: z.object({
@@ -55,6 +56,8 @@ const configSchema = z.object({
       security: z.string().default('0 9 * * 1-5'),
       fleet: z.string().default('0 10 * * 1'),
     }),
+    maxRetries: z.number().int().nonnegative().default(2),
+    retryBackoffMs: z.number().int().positive().default(30_000),
   }),
 });
 
@@ -80,6 +83,7 @@ function buildEnvMap(env: Record<string, string | undefined>): Record<string, un
       secretAccessKey: env.AWS_SECRET_ACCESS_KEY || undefined,
       model: env.BEDROCK_MODEL ?? undefined,
       maxToolRounds: env.BEDROCK_MAX_TOOL_ROUNDS ? Number(env.BEDROCK_MAX_TOOL_ROUNDS) : undefined,
+      maxTokens: env.BEDROCK_MAX_TOKENS ? Number(env.BEDROCK_MAX_TOKENS) : undefined,
       requestTimeoutMs: env.BEDROCK_REQUEST_TIMEOUT_MS ? Number(env.BEDROCK_REQUEST_TIMEOUT_MS) : undefined,
     },
     slack: {
@@ -99,6 +103,8 @@ function buildEnvMap(env: Record<string, string | undefined>): Record<string, un
         security: env.CRON_SECURITY ?? undefined,
         fleet: env.CRON_FLEET ?? undefined,
       },
+      maxRetries: env.SCHEDULER_MAX_RETRIES ? Number(env.SCHEDULER_MAX_RETRIES) : undefined,
+      retryBackoffMs: env.SCHEDULER_RETRY_BACKOFF_MS ? Number(env.SCHEDULER_RETRY_BACKOFF_MS) : undefined,
     },
   };
 }

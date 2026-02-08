@@ -84,6 +84,26 @@ describe('metrics', () => {
       expect(mockPutMetric).toHaveBeenCalledWith('agent.run.rounds', 3, 'Count');
       expect(mockFlush).toHaveBeenCalled();
     });
+
+    it('records token usage when provided', async () => {
+      await recordAgentRun(5000, 12, 3, {
+        inputTokens: 1000,
+        outputTokens: 500,
+        totalTokens: 1500,
+      });
+
+      expect(mockPutMetric).toHaveBeenCalledWith('agent.run.input_tokens', 1000, 'Count');
+      expect(mockPutMetric).toHaveBeenCalledWith('agent.run.output_tokens', 500, 'Count');
+      expect(mockPutMetric).toHaveBeenCalledWith('agent.run.total_tokens', 1500, 'Count');
+    });
+
+    it('does not record token metrics when tokenUsage not provided', async () => {
+      await recordAgentRun(5000, 12, 3);
+
+      expect(mockPutMetric).not.toHaveBeenCalledWith('agent.run.input_tokens', expect.anything(), expect.anything());
+      expect(mockPutMetric).not.toHaveBeenCalledWith('agent.run.output_tokens', expect.anything(), expect.anything());
+      expect(mockPutMetric).not.toHaveBeenCalledWith('agent.run.total_tokens', expect.anything(), expect.anything());
+    });
   });
 
   describe('recordSchedulerJob', () => {

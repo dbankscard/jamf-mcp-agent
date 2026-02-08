@@ -77,6 +77,29 @@ describe('loadConfig', () => {
     expect(config.bedrock.region).toBe('us-east-1');
     expect(config.bedrock.model).toContain('claude');
     expect(config.bedrock.maxToolRounds).toBe(15);
+    expect(config.bedrock.maxTokens).toBe(8192);
+  });
+
+  it('applies scheduler defaults', async () => {
+    process.env.MCP_TRANSPORT = 'http';
+    process.env.MCP_SERVER_URL = 'http://localhost:3001/mcp';
+
+    const { loadConfig } = await import('./config.js');
+    const config = await loadConfig();
+
+    expect(config.scheduler.maxRetries).toBe(2);
+    expect(config.scheduler.retryBackoffMs).toBe(30_000);
+  });
+
+  it('reads BEDROCK_MAX_TOKENS from env', async () => {
+    process.env.MCP_TRANSPORT = 'http';
+    process.env.MCP_SERVER_URL = 'http://localhost:3001/mcp';
+    process.env.BEDROCK_MAX_TOKENS = '4096';
+
+    const { loadConfig } = await import('./config.js');
+    const config = await loadConfig();
+
+    expect(config.bedrock.maxTokens).toBe(4096);
   });
 
   it('reads custom timeout values from env', async () => {

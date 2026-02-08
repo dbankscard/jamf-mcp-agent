@@ -42,11 +42,17 @@ export async function recordAgentRun(
   durationMs: number,
   toolCalls: number,
   rounds: number,
+  tokenUsage?: { inputTokens: number; outputTokens: number; totalTokens: number },
 ): Promise<void> {
   await withMetrics(m => {
     m.putMetric('agent.run.duration', durationMs, Unit.Milliseconds);
     m.putMetric('agent.run.tool_calls', toolCalls, Unit.Count);
     m.putMetric('agent.run.rounds', rounds, Unit.Count);
+    if (tokenUsage) {
+      m.putMetric('agent.run.input_tokens', tokenUsage.inputTokens, Unit.Count);
+      m.putMetric('agent.run.output_tokens', tokenUsage.outputTokens, Unit.Count);
+      m.putMetric('agent.run.total_tokens', tokenUsage.totalTokens, Unit.Count);
+    }
   });
 }
 

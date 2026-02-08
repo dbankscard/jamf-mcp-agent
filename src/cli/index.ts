@@ -2,6 +2,7 @@
 import { Command } from 'commander';
 import { loadConfig, type Config } from '../config.js';
 import { MCPClient } from '../mcp/client.js';
+import { buildMCPOptions } from '../mcp/options.js';
 import { Agent } from '../claude/agent.js';
 import { SlackClient } from '../slack/client.js';
 import { getSystemPrompt, ReportType, getRemediationPrompt, buildRemediationUserMessage } from '../claude/prompts.js';
@@ -26,7 +27,8 @@ program
   .command('check <type>')
   .description('Run a report: compliance, security, or fleet')
   .option('--slack', 'Also post the report to Slack')
-  .action(async (type: string, opts: { slack?: boolean }) => {
+  .option('--save <path>', 'Save the report JSON to a file')
+  .action(async (type: string, opts: { slack?: boolean; save?: string }) => {
     if (!['compliance', 'security', 'fleet'].includes(type)) {
       console.error(`Unknown report type: ${type}. Use compliance, security, or fleet.`);
       process.exit(1);
@@ -37,7 +39,7 @@ program
     try {
       const slackClient = opts.slack ? slack : null;
       const channelId = config.slack.channels[type as keyof typeof config.slack.channels];
-      await runJob(type as ReportType, agent, slackClient, channelId);
+      await runJob(type as ReportType, agent, slackClient, channelId, opts.save, config, mcp);
     } finally {
       await mcp.disconnect();
     }
@@ -47,16 +49,19 @@ program
   .command('ask <question>')
   .description('Ask the agent an ad-hoc question about your Jamf environment')
   .option('--write', 'Allow the agent to use write tools (create, update, deploy)')
-  .action(async (question: string, opts: { write?: boolean }) => {
-    const { agent, mcp } = await boot({ readOnlyTools: !opts.write });
+  .option('--save <path>', 'Save the response to a file')
+  .action(async (question: string, opts: { write?: boolean; save?: string }) => {
+    const writeMode = opts.write ?? false;
+    const { agent, mcp } = await boot({ readOnlyTools: !writeMode });
 
     try {
-      const result = await agent.run(getSystemPrompt('adhoc'), question);
-      if (result.report) {
-        console.log(JSON.stringify(result.report, null, 2));
-      } else {
-        console.log(result.rawText);
-      }
+      const prompt = writeMode ? getSystemPrompt('adhoc-write') : getSystemPrompt('adhoc');
+      const result = await agent.run(prompt, question);
+      const output = result.report
+        ? JSON.stringify(result.report, null, 2)
+        : result.rawText;
+      console.log(output);
+      if (opts.save) saveOutput(opts.save, output);
     } finally {
       await mcp.disconnect();
     }
@@ -69,7 +74,11 @@ program
     const { agent, slack, mcp, config } = await boot();
 
     shutdownManager.onShutdown(() => mcp.disconnect());
-    startScheduler({ agent, slack, config });
+    startScheduler({ agent, slack, config, mcp });
+
+    const checker = new HealthChecker(mcp, config);
+    const stopHealthCheck = checker.startPeriodicCheck(60_000);
+    shutdownManager.onShutdown(async () => stopHealthCheck());
 
     shutdownManager.install();
     logger.info('Agent running in daemon mode. Press Ctrl+C to stop.');
@@ -104,31 +113,7 @@ interface BootOptions {
 async function boot(options?: BootOptions): Promise<{ agent: Agent; slack: SlackClient | null; mcp: MCPClient; config: Config }> {
   const config = await loadConfig();
 
-  const mcpOptions = config.mcp.transport === 'http'
-    ? {
-        transport: 'http' as const,
-        serverUrl: config.mcp.serverUrl!,
-        connectTimeoutMs: config.mcp.connectTimeoutMs,
-        toolTimeoutMs: config.mcp.toolTimeoutMs,
-        maxReconnectAttempts: config.mcp.maxReconnectAttempts,
-        reconnectBaseMs: config.mcp.reconnectBaseMs,
-      }
-    : {
-        transport: 'stdio' as const,
-        command: 'node',
-        args: [config.mcp.serverPath!],
-        env: {
-          JAMF_URL: config.mcp.jamfUrl!,
-          JAMF_CLIENT_ID: config.mcp.jamfClientId!,
-          JAMF_CLIENT_SECRET: config.mcp.jamfClientSecret!,
-        },
-        connectTimeoutMs: config.mcp.connectTimeoutMs,
-        toolTimeoutMs: config.mcp.toolTimeoutMs,
-        maxReconnectAttempts: config.mcp.maxReconnectAttempts,
-        reconnectBaseMs: config.mcp.reconnectBaseMs,
-      };
-
-  const mcp = new MCPClient(mcpOptions);
+  const mcp = new MCPClient(buildMCPOptions(config));
 
   await mcp.connect();
 
@@ -140,6 +125,7 @@ async function boot(options?: BootOptions): Promise<{ agent: Agent; slack: Slack
   const agent = new Agent(mcp, {
     model: config.bedrock.model,
     maxToolRounds: config.bedrock.maxToolRounds,
+    maxTokens: config.bedrock.maxTokens,
     region: config.bedrock.region,
     accessKeyId: config.bedrock.accessKeyId,
     secretAccessKey: config.bedrock.secretAccessKey,
@@ -164,6 +150,7 @@ program
   .option('--min-severity <level>', 'Minimum severity for auto-approve (critical, high, medium, low)', 'medium')
   .option('--finding <indices>', 'Comma-separated finding indices to remediate')
   .option('--slack', 'Post remediation results to Slack')
+  .option('--save <path>', 'Save the remediation report JSON to a file')
   .action(async (type: string | undefined, opts: {
     file?: string;
     dryRun?: boolean;
@@ -171,6 +158,7 @@ program
     minSeverity?: string;
     finding?: string;
     slack?: boolean;
+    save?: string;
   }) => {
     if (!type && !opts.file) {
       console.error('Provide a report type (compliance, security, fleet) or --file <path>.');
@@ -184,49 +172,89 @@ program
       return;
     }
 
-    // Phase 1: Load or generate the report
-    let report: AgentReport;
-    let reportType = type ?? 'compliance';
+    const dryRun = opts.dryRun ?? false;
 
-    if (opts.file) {
-      report = loadReportFromFile(opts.file);
-    } else {
-      const { agent, mcp } = await boot();
-      try {
-        const result = await agent.run(getSystemPrompt(reportType as ReportType), `Run a ${reportType} check on the fleet and produce a report.`);
+    // Boot once — reuse the connection for both analysis and remediation.
+    // For analysis we always use read-only; for remediation, dry-run stays read-only.
+    const { agent: analysisAgent, slack, mcp, config } = opts.file
+      ? await boot({ readOnlyTools: dryRun })
+      : await boot();
+
+    try {
+      // Phase 1: Load or generate the report
+      let report: AgentReport;
+      let reportType = type ?? 'compliance';
+
+      if (opts.file) {
+        report = loadReportFromFile(opts.file);
+      } else {
+        const result = await analysisAgent.run(getSystemPrompt(reportType as ReportType), `Run a ${reportType} check on the fleet and produce a report.`);
         if (!result.report) {
           console.error('Analysis did not produce a structured report.');
           process.exit(1);
           return;
         }
         report = result.report;
-      } finally {
-        await mcp.disconnect();
       }
-    }
 
-    if (report.findings.length === 0) {
-      console.log(JSON.stringify({ summary: 'No findings to remediate.', actions: [], dryRun: opts.dryRun ?? false }, null, 2));
-      return;
-    }
+      // Print analysis summary to stderr
+      process.stderr.write(`Analysis: ${report.overallStatus} — ${report.findings.length} finding(s)\n`);
+      for (let i = 0; i < report.findings.length; i++) {
+        process.stderr.write(printFindingSummary(report.findings[i], i) + '\n');
+      }
 
-    // Phase 2: Select findings
-    const selectedIndices = await selectFindings(report.findings, opts);
+      if (report.findings.length === 0) {
+        console.log(JSON.stringify({ summary: 'No findings to remediate.', actions: [], dryRun }, null, 2));
+        return;
+      }
 
-    if (selectedIndices.length === 0) {
-      console.log(JSON.stringify({ summary: 'No findings selected for remediation.', actions: [], dryRun: opts.dryRun ?? false }, null, 2));
-      return;
-    }
+      // Phase 2: Select findings
+      const selectedIndices = await selectFindings(report.findings, opts);
 
-    // Phase 3: Run remediation agent
-    const dryRun = opts.dryRun ?? false;
-    const { agent, slack, mcp, config } = await boot({ readOnlyTools: dryRun });
+      // Print selection summary to stderr
+      const selectedSet = new Set(selectedIndices);
+      process.stderr.write(`Selected ${selectedIndices.length} of ${report.findings.length} finding(s) for remediation:\n`);
+      for (let i = 0; i < report.findings.length; i++) {
+        const f = report.findings[i];
+        const status = selectedSet.has(i)
+          ? 'selected'
+          : !f.remediation.automatable
+            ? 'skipped (manual)'
+            : (SEVERITY_ORDER[f.severity] ?? 3) > (SEVERITY_ORDER[opts.minSeverity ?? 'medium'] ?? 2)
+              ? 'skipped (below min-severity)'
+              : 'skipped (not selected)';
+        process.stderr.write(`  [${i}] [${f.severity.toUpperCase()}] ${f.title} (${f.affectedDeviceCount} device(s)) — ${status}\n`);
+      }
 
-    try {
+      if (selectedIndices.length === 0) {
+        console.log(JSON.stringify({ summary: 'No findings selected for remediation.', actions: [], dryRun }, null, 2));
+        return;
+      }
+
+      // Phase 3: Run remediation agent
+      // Create a new agent with write tools if this is a live run (not dry-run).
+      // For dry-run, the analysis agent (read-only) is reused directly.
+      const remediationAgent = dryRun
+        ? analysisAgent
+        : new Agent(mcp, {
+            model: config.bedrock.model,
+            maxToolRounds: config.bedrock.maxToolRounds,
+            maxTokens: config.bedrock.maxTokens,
+            region: config.bedrock.region,
+            accessKeyId: config.bedrock.accessKeyId,
+            secretAccessKey: config.bedrock.secretAccessKey,
+            requestTimeoutMs: config.bedrock.requestTimeoutMs,
+            readOnlyTools: false,
+          });
+
+      if (!dryRun) {
+        logger.warn('Write mode enabled — agent can modify your Jamf environment');
+      }
+
       const start = Date.now();
       const systemPrompt = getRemediationPrompt(dryRun);
-      const userMessage = buildRemediationUserMessage(report.findings, selectedIndices);
-      const result = await agent.runRemediation(systemPrompt, userMessage);
+      const userMessage = buildRemediationUserMessage(report.findings, selectedIndices, report.overallStatus);
+      const result = await remediationAgent.runRemediation(systemPrompt, userMessage);
 
       recordRemediation(
         Date.now() - start,
@@ -236,7 +264,9 @@ program
       ).catch(() => {});
 
       if (result.report) {
-        console.log(JSON.stringify(result.report, null, 2));
+        const output = JSON.stringify(result.report, null, 2);
+        console.log(output);
+        if (opts.save) saveOutput(opts.save, output);
 
         if (opts.slack && slack) {
           const channelId = config.slack.channels[reportType as keyof typeof config.slack.channels] ?? '';
@@ -244,11 +274,23 @@ program
         }
       } else {
         console.log(result.rawText);
+        if (opts.save) saveOutput(opts.save, result.rawText);
       }
     } finally {
       await mcp.disconnect();
     }
   });
+
+function validateFinding(finding: any, index: number): string | null {
+  if (!finding || typeof finding !== 'object') return `findings[${index}]: not an object`;
+  if (typeof finding.title !== 'string') return `findings[${index}]: missing title`;
+  if (!['critical', 'high', 'medium', 'low'].includes(finding.severity)) return `findings[${index}]: invalid severity "${finding.severity}"`;
+  if (typeof finding.affectedDeviceCount !== 'number') return `findings[${index}]: missing affectedDeviceCount`;
+  if (!Array.isArray(finding.affectedDevices)) return `findings[${index}]: missing affectedDevices array`;
+  if (!finding.remediation || typeof finding.remediation !== 'object') return `findings[${index}]: missing remediation object`;
+  if (typeof finding.remediation.automatable !== 'boolean') return `findings[${index}]: remediation.automatable must be a boolean`;
+  return null;
+}
 
 function loadReportFromFile(filePath: string): AgentReport {
   const raw = fs.readFileSync(filePath, 'utf-8');
@@ -257,7 +299,26 @@ function loadReportFromFile(filePath: string): AgentReport {
     console.error('Invalid report file: missing required fields (summary, overallStatus, findings).');
     process.exit(1);
   }
+
+  for (let i = 0; i < parsed.findings.length; i++) {
+    const error = validateFinding(parsed.findings[i], i);
+    if (error) {
+      console.error(`Invalid report file: ${error}.`);
+      process.exit(1);
+    }
+  }
+
   return parsed as AgentReport;
+}
+
+function saveOutput(filePath: string, content: string): void {
+  fs.writeFileSync(filePath, content + '\n', 'utf-8');
+  process.stderr.write(`Saved to ${filePath}\n`);
+}
+
+function printFindingSummary(finding: Finding, index: number): string {
+  const auto = finding.remediation.automatable ? 'automatable' : 'manual';
+  return `  [${index}] [${finding.severity.toUpperCase()}] ${finding.title} (${finding.affectedDeviceCount} device(s), ${auto})`;
 }
 
 const SEVERITY_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 };
@@ -289,9 +350,7 @@ async function selectFindings(
   // Display findings
   console.log('\nFindings:\n');
   for (let i = 0; i < findings.length; i++) {
-    const f = findings[i];
-    const auto = f.remediation.automatable ? 'automatable' : 'manual';
-    console.log(`  [${i}] [${f.severity.toUpperCase()}] ${f.title} (${f.affectedDeviceCount} device(s), ${auto})`);
+    console.log(printFindingSummary(findings[i], i));
   }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });

@@ -8,7 +8,7 @@ export interface BedrockTool {
   };
 }
 
-const READ_ONLY_PATTERN = /^(search|list|get|check|read|skill_)/;
+const READ_ONLY_PATTERN = /^(search|list|get|check|read)/;
 
 const ALWAYS_INCLUDE = new Set([
   'getFleetOverview',
@@ -19,6 +19,11 @@ const ALWAYS_INCLUDE = new Set([
   'getInventorySummary',
   'checkDeviceCompliance',
   'getDeviceComplianceSummary',
+  // Read-only compound skills (write skills like skill_batch_inventory_update
+  // and skill_deploy_policy_by_criteria are intentionally excluded)
+  'skill_device_search',
+  'skill_find_outdated_devices',
+  'skill_scheduled_compliance_check',
 ]);
 
 /**

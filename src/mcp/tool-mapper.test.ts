@@ -19,6 +19,10 @@ describe('mapTools', () => {
     makeTool('deleteScript'),
     makeTool('checkDeviceCompliance'),
     makeTool('skill_batch_inventory_update'),
+    makeTool('skill_deploy_policy_by_criteria'),
+    makeTool('skill_device_search'),
+    makeTool('skill_find_outdated_devices'),
+    makeTool('skill_scheduled_compliance_check'),
     makeTool('readSomething'),
   ];
 
@@ -30,8 +34,14 @@ describe('mapTools', () => {
     expect(names).toContain('searchDevices');
     expect(names).toContain('listPolicies');
     expect(names).toContain('checkDeviceCompliance');
-    expect(names).toContain('skill_batch_inventory_update');
     expect(names).toContain('readSomething');
+    // Read-only compound skills are included
+    expect(names).toContain('skill_device_search');
+    expect(names).toContain('skill_find_outdated_devices');
+    expect(names).toContain('skill_scheduled_compliance_check');
+    // Write compound skills are excluded in read-only mode
+    expect(names).not.toContain('skill_batch_inventory_update');
+    expect(names).not.toContain('skill_deploy_policy_by_criteria');
     expect(names).not.toContain('createPolicy');
     expect(names).not.toContain('deleteScript');
   });
@@ -43,9 +53,14 @@ describe('mapTools', () => {
     expect(result[0].toolSpec.name).toBe('getDeviceFullProfile');
   });
 
-  it('includes all tools when readOnlyOnly=false', () => {
+  it('includes all tools including write compound skills when readOnlyOnly=false', () => {
     const result = mapTools(allTools, false);
+    const names = result.map(t => t.toolSpec.name);
     expect(result).toHaveLength(allTools.length);
+    expect(names).toContain('skill_batch_inventory_update');
+    expect(names).toContain('skill_deploy_policy_by_criteria');
+    expect(names).toContain('createPolicy');
+    expect(names).toContain('deleteScript');
   });
 
   it('converts to Bedrock tool shape', () => {

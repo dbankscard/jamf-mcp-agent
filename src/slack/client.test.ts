@@ -408,6 +408,37 @@ describe('SlackClient', () => {
     });
   });
 
+  it('medium/low summary thread failure logs warning and does not throw', async () => {
+    const report = makeReport({
+      findings: [
+        {
+          title: 'Medium issue',
+          severity: 'medium',
+          category: 'compliance',
+          description: 'desc',
+          affectedDeviceCount: 3,
+          affectedDevices: [],
+          remediation: { title: 'Fix', steps: [], effort: 'medium', automatable: false },
+        },
+      ],
+    });
+
+    // Header succeeds, then summary thread post fails
+    mockPostMessage
+      .mockResolvedValueOnce({ ok: true, ts: '123.456' })
+      .mockRejectedValueOnce(new Error('rate_limited'));
+
+    const client = new SlackClient('xoxb-test');
+    // Should not throw
+    await client.postReport('C123', report, 'compliance');
+
+    expect(mockPostMessage).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Failed to post additional findings summary',
+      expect.objectContaining({ error: 'rate_limited' }),
+    );
+  });
+
   it('finding thread failure with non-Error value logs stringified warning', async () => {
     const report = makeReport({
       findings: [

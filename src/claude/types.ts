@@ -28,11 +28,18 @@ export interface Remediation {
   automatable: boolean;
 }
 
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+}
+
 export interface AgentResult {
   report: AgentReport | null;
   rawText: string;
   toolCallCount: number;
   rounds: number;
+  tokenUsage: TokenUsage;
 }
 
 export interface RemediationAction {
@@ -61,4 +68,5 @@ export interface RemediationResult {
   rawText: string;
   toolCallCount: number;
   rounds: number;
+  tokenUsage: TokenUsage;
 }

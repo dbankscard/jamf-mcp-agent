@@ -1,8 +1,17 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock scheduler before importing health
 vi.mock('./scheduler/index.js', () => ({
   getRunningJobs: vi.fn(() => []),
+}));
+
+vi.mock('./logger.js', () => ({
+  logger: {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  },
 }));
 
 import { HealthChecker, type HealthStatus } from './health.js';
@@ -129,5 +138,34 @@ describe('HealthChecker', () => {
     const status = await checker.getHealthStatus();
     expect(status.timestamp).toBeDefined();
     expect(() => new Date(status.timestamp)).not.toThrow();
+  });
+});
+
+describe('startPeriodicCheck', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('returns a stop function that clears the interval', () => {
+    vi.useFakeTimers();
+    const checker = new HealthChecker(makeMCP(true, 50), makeConfig());
+    const stop = checker.startPeriodicCheck(1000);
+    expect(typeof stop).toBe('function');
+    stop();
+  });
+
+  it('logs warning when health degrades', async () => {
+    vi.useFakeTimers();
+    const { logger } = await import('./logger.js');
+
+    const checker = new HealthChecker(null, makeConfig());
+    const stop = checker.startPeriodicCheck(1000);
+
+    await vi.advanceTimersByTimeAsync(1000);
+
+    expect(vi.mocked(logger.warn)).toHaveBeenCalledWith(
+      expect.stringContaining('Health unhealthy'),
+    );
+    stop();
   });
 });

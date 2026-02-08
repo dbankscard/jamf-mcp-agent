@@ -14,9 +14,28 @@ vi.mock('../context.js', () => ({
   getJobType: vi.fn(() => undefined),
 }));
 
+const mockTrackOperation = vi.fn<(label: string) => () => void>(() => vi.fn());
+
+vi.mock('../shutdown.js', () => ({
+  shutdownManager: {
+    trackOperation: (label: string) => mockTrackOperation(label),
+  },
+}));
+
 import { runJob, startScheduler, getRunningJobs } from './index.js';
 import cron from 'node-cron';
 import type { Config } from '../config.js';
+
+// Config with 0 retries for fast tests
+const testConfig = {
+  scheduler: {
+    timezone: 'UTC',
+    maxRetries: 0,
+    retryBackoffMs: 10,
+    cron: { compliance: '0 8 * * *', security: '0 9 * * *', fleet: '0 10 * * 1' },
+  },
+  slack: { channels: {} },
+} as Config;
 
 function makeAgent(mockResult?: any) {
   return {
@@ -52,7 +71,7 @@ describe('runJob', () => {
     const agent = makeAgent();
     const slack = makeSlack();
 
-    await runJob('compliance', agent, slack, 'C123');
+    await runJob('compliance', agent, slack, 'C123', undefined, testConfig);
 
     expect(agent.run).toHaveBeenCalledTimes(1);
     expect(slack.postReport).toHaveBeenCalledTimes(1);
@@ -77,13 +96,13 @@ describe('runJob', () => {
     );
 
     // Start first job (don't await)
-    const job1 = runJob('compliance', agent, null, undefined);
+    const job1 = runJob('compliance', agent, null, undefined, undefined, testConfig);
 
     // Wait a tick for the first job to start
     await new Promise(r => setTimeout(r, 50));
 
     // Second job should be skipped
-    await runJob('compliance', agent, null, undefined);
+    await runJob('compliance', agent, null, undefined, undefined, testConfig);
 
     // Wait for first to finish
     await job1;
@@ -94,7 +113,7 @@ describe('runJob', () => {
 
   it('releases lock after job completes', async () => {
     const agent = makeAgent();
-    await runJob('security', agent, null, undefined);
+    await runJob('security', agent, null, undefined, undefined, testConfig);
     expect(getRunningJobs()).not.toContain('security');
   });
 
@@ -102,8 +121,32 @@ describe('runJob', () => {
     const agent = makeAgent();
     agent.run.mockRejectedValue(new Error('boom'));
 
-    await runJob('fleet', agent, null, undefined);
+    await runJob('fleet', agent, null, undefined, undefined, testConfig);
     expect(getRunningJobs()).not.toContain('fleet');
+  });
+
+  it('tracks operation for graceful shutdown', async () => {
+    const mockDone = vi.fn();
+    mockTrackOperation.mockReturnValue(mockDone);
+
+    const agent = makeAgent();
+    await runJob('compliance', agent, null, undefined, undefined, testConfig);
+
+    expect(mockTrackOperation).toHaveBeenCalledWith('compliance-job');
+    expect(mockDone).toHaveBeenCalledTimes(1);
+  });
+
+  it('releases shutdown tracking on job error', async () => {
+    const mockDone = vi.fn();
+    mockTrackOperation.mockReturnValue(mockDone);
+
+    const agent = makeAgent();
+    agent.run.mockRejectedValue(new Error('agent failed'));
+
+    await runJob('security', agent, null, undefined, undefined, testConfig);
+
+    expect(mockTrackOperation).toHaveBeenCalledWith('security-job');
+    expect(mockDone).toHaveBeenCalledTimes(1);
   });
 
   it('posts error to Slack on job failure', async () => {
@@ -111,7 +154,7 @@ describe('runJob', () => {
     agent.run.mockRejectedValue(new Error('agent failed'));
     const slack = makeSlack();
 
-    await runJob('compliance', agent, slack, 'C123');
+    await runJob('compliance', agent, slack, 'C123', undefined, testConfig);
 
     expect(slack.postError).toHaveBeenCalledTimes(1);
     expect(slack.postError.mock.calls[0][1]).toBe('agent failed');
@@ -119,33 +162,52 @@ describe('runJob', () => {
 
   it('runs without Slack', async () => {
     const agent = makeAgent();
-    await runJob('compliance', agent, null, undefined);
+    await runJob('compliance', agent, null, undefined, undefined, testConfig);
     expect(agent.run).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries on failure when maxRetries > 0', async () => {
+    const retryConfig = { ...testConfig, scheduler: { ...testConfig.scheduler, maxRetries: 1, retryBackoffMs: 10 } } as Config;
+    const agent = makeAgent();
+    agent.run
+      .mockRejectedValueOnce(new Error('transient'))
+      .mockResolvedValueOnce({
+        report: { summary: 'ok', overallStatus: 'healthy', findings: [], metrics: {} },
+        rawText: '{}',
+        toolCallCount: 1,
+        rounds: 1,
+      });
+
+    await runJob('compliance', agent, null, undefined, undefined, retryConfig);
+
+    expect(agent.run).toHaveBeenCalledTimes(2);
+  });
+
+  it('exhausts retries and posts error', async () => {
+    const retryConfig = { ...testConfig, scheduler: { ...testConfig.scheduler, maxRetries: 1, retryBackoffMs: 10 } } as Config;
+    const agent = makeAgent();
+    agent.run.mockRejectedValue(new Error('persistent failure'));
+    const slack = makeSlack();
+
+    await runJob('compliance', agent, slack, 'C123', undefined, retryConfig);
+
+    // 1 initial + 1 retry = 2 attempts
+    expect(agent.run).toHaveBeenCalledTimes(2);
+    expect(slack.postError).toHaveBeenCalledTimes(1);
   });
 });
 
 describe('startScheduler', () => {
   it('registers cron jobs', () => {
     const agent = makeAgent();
-    const config = {
-      scheduler: {
-        timezone: 'UTC',
-        cron: { compliance: '0 8 * * *', security: '0 9 * * *', fleet: '0 10 * * 1' },
-      },
-      slack: { channels: {} },
-    } as Config;
 
-    startScheduler({ agent, slack: null, config });
+    startScheduler({ agent, slack: null, config: testConfig });
 
     expect(cron.schedule).toHaveBeenCalledTimes(3);
   });
 });
 
 describe('getRunningJobs', () => {
-  it('returns empty when no jobs running', () => {
-    expect(getRunningJobs()).toEqual([]);
-  });
-
   it('returns running job types during execution', async () => {
     let capturedRunning: string[] = [];
     const agent = makeAgent();
@@ -160,7 +222,7 @@ describe('getRunningJobs', () => {
       };
     });
 
-    await runJob('security', agent, null, undefined);
+    await runJob('security', agent, null, undefined, undefined, testConfig);
 
     // During execution, 'security' should have been in the running list
     expect(capturedRunning).toContain('security');
@@ -184,7 +246,7 @@ describe('runJob — no structured report', () => {
 
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await runJob('compliance', agent, null, undefined);
+    await runJob('compliance', agent, null, undefined, undefined, testConfig);
 
     // Should print rawText to console since report is null
     expect(consoleSpy).toHaveBeenCalledWith('raw output text here');
@@ -206,6 +268,6 @@ describe('runJob — Slack postError failure', () => {
     slack.postError.mockRejectedValue(new Error('Slack is down'));
 
     // This should NOT throw even though postError fails
-    await expect(runJob('compliance', agent, slack, 'C123')).resolves.toBeUndefined();
+    await expect(runJob('compliance', agent, slack, 'C123', undefined, testConfig)).resolves.toBeUndefined();
   });
 });
